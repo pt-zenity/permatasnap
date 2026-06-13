@@ -1135,6 +1135,57 @@ $isConfigured = (KODE_AGEN !== '' && OAUTH_CLIENT_ID !== '' && OAUTH_USERNAME !=
         .cfg .cg-v.warn { color: #d97706; }
         .cfg .cg-v.err  { color: #dc2626; }
 
+        /* ── Auto-Detection Panel ── */
+        .det-panel {
+            border-radius: 14px; overflow: hidden;
+            margin-bottom: 18px; border: 1.5px solid #e2e8f0;
+        }
+        .det-panel-header {
+            display: flex; align-items: center; gap: 10px;
+            padding: 11px 16px;
+            font-weight: 800; font-size: .82rem; letter-spacing: .3px;
+        }
+        .det-panel-header.ready { background: #dcfce7; color: #14532d; border-bottom: 1.5px solid #bbf7d0; }
+        .det-panel-header.warn  { background: #fef9c3; color: #713f12; border-bottom: 1.5px solid #fde68a; }
+        .det-panel-header.error { background: #fee2e2; color: #7f1d1d; border-bottom: 1.5px solid #fca5a5; }
+        .det-badge {
+            margin-left: auto; border-radius: 20px; padding: 2px 11px;
+            font-size: .7rem; font-weight: 800; letter-spacing: .5px;
+        }
+        .det-badge.ready { background: #16a34a; color: #fff; }
+        .det-badge.warn  { background: #d97706; color: #fff; }
+        .det-badge.error { background: #dc2626; color: #fff; }
+        .det-rows { background: #fff; }
+        .det-row {
+            display: grid;
+            grid-template-columns: 22px 160px 1fr auto;
+            align-items: center; gap: 8px;
+            padding: 8px 16px; border-bottom: 1px solid #f1f5f9;
+            font-size: .8rem;
+        }
+        .det-row:last-child { border-bottom: none; }
+        .det-row:hover { background: #f8fafc; }
+        .det-icon { font-size: 14px; text-align: center; }
+        .det-key  { color: #64748b; font-family: monospace; font-size: .76rem; }
+        .det-val  { color: #1e293b; font-weight: 600; word-break: break-all; }
+        .det-val.ok   { color: #059669; }
+        .det-val.warn { color: #d97706; }
+        .det-val.err  { color: #dc2626; }
+        .det-pill {
+            font-size: .65rem; font-weight: 700; border-radius: 10px;
+            padding: 1px 8px; white-space: nowrap;
+        }
+        .det-pill.ok   { background: #dcfce7; color: #14532d; }
+        .det-pill.warn { background: #fef9c3; color: #713f12; }
+        .det-pill.err  { background: #fee2e2; color: #991b1b; }
+        .det-pill.info { background: #dbeafe; color: #1e3a8a; }
+        .det-section-label {
+            padding: 5px 16px 3px;
+            font-size: .67rem; font-weight: 800; color: #94a3b8;
+            text-transform: uppercase; letter-spacing: .8px;
+            background: #f8fafc; border-bottom: 1px solid #f1f5f9;
+        }
+
         /* ── Alert ── */
         .alert {
             border-radius: 10px; padding: 13px 17px;
@@ -1307,84 +1358,230 @@ $isConfigured = (KODE_AGEN !== '' && OAUTH_CLIENT_ID !== '' && OAUTH_USERNAME !=
     <div class="card">
         <div class="card-header blue">
             <div class="ch-icon">⚙️</div>
-            Status Konfigurasi Middleware (BIFAST)
-            <span class="ch-badge"><?= $isConfigured ? '✅ Siap' : '⚠️ Belum Lengkap' ?></span>
+            Status Auto-Detection &amp; Konfigurasi (BIFAST)
+            <?php
+                $totalOk  = 0; $totalErr = 0; $totalWarn = 0;
+                if (KODE_AGEN !== '')       $totalOk++; else $totalErr++;
+                if (OAUTH_CLIENT_ID !== '') $totalOk++; else $totalErr++;
+                if (OAUTH_USERNAME !== '')  $totalOk++; else $totalErr++;
+                if ($_ASSIST_ROOT !== '')   $totalOk++; else $totalWarn++;
+                if ($_ASSIST_BPR_ROOT !== '') $totalOk++; else $totalWarn++;
+                $overallClass = $totalErr > 0 ? 'error' : ($totalWarn > 0 ? 'warn' : 'ready');
+                $overallLabel = $totalErr > 0 ? '❌ Belum Siap' : ($totalWarn > 0 ? '⚠️ Sebagian' : '✅ Siap');
+            ?>
+            <span class="ch-badge"><?= $overallLabel ?></span>
         </div>
         <div class="card-body" style="padding:18px 24px;">
 
-            <!-- Detection Log -->
-            <div style="background:#ecfdf5;border:1px solid #6ee7b7;border-radius:10px;padding:12px 16px;margin-bottom:16px;font-size:.8rem;">
-                <div style="font-weight:800;color:#065f46;margin-bottom:6px;">🔍 Auto-Detection Report (BIFAST)</div>
-                <div style="display:grid;grid-template-columns:1fr 1fr;gap:3px 16px;">
-                <?php foreach ($_DETECTION_LOG as $k => $v): ?>
-                    <div><span style="color:#64748b;font-family:monospace;"><?= htmlspecialchars($k) ?></span>: <span><?= htmlspecialchars($v) ?></span></div>
-                <?php endforeach; ?>
-                </div>
-                <?php if (!empty($_ASSIST_ROOT)): ?>
-                <div style="margin-top:6px;color:#065f46;">📂 Assist Root: <code><?= htmlspecialchars($_ASSIST_ROOT) ?></code></div>
+        <?php
+        $assistRootOk  = $_ASSIST_ROOT !== '';
+        $bprRootOk     = $_ASSIST_BPR_ROOT !== '';
+        $localCfgOk    = !empty($_LOCAL_CONFIG);
+        $urlTokenOk    = !empty($_LOCAL_CONFIG['_URL_GET_TOKEN_']);
+        $urlDigitalOk  = !empty($_LOCAL_CONFIG['s']);
+        $cicdOk        = !empty($_LOCAL_CONFIG['cicd']);
+        $kodeAgenOk    = KODE_AGEN !== '';
+        $mftfiOk       = !empty($_CACHE_BF['mftfi'] ?? null);
+        $cacheFileOk   = file_exists(CACHE_FILE_BIFAST);
+        $oauthIdOk     = OAUTH_CLIENT_ID !== '';
+        $oauthSecOk    = OAUTH_CLIENT_SECRET !== '';
+        $oauthUserOk   = OAUTH_USERNAME !== '';
+        $oauthPassOk   = OAUTH_PASSWORD !== '';
+        $corpIdOk      = OAUTH_CORPORATE_ID !== '';
+        $rsaKeyOk      = OAUTH_TOKEN_PRIVATE !== '';
+        $de061Ok       = DE061_SIM_SERIAL !== '';
+        $envFileOk     = !empty($_BPR_ENV['_env_file'] ?? ($_ASSIST_ENV['_env_file'] ?? ''));
+
+        $row = function(string $icon, string $key, string $val, string $cls, string $pill, string $pillCls) {
+            echo '<div class="det-row">';
+            echo '<span class="det-icon">' . $icon . '</span>';
+            echo '<span class="det-key">' . htmlspecialchars($key) . '</span>';
+            echo '<span class="det-val ' . $cls . '">' . htmlspecialchars($val) . '</span>';
+            echo '<span class="det-pill ' . $pillCls . '">' . $pill . '</span>';
+            echo '</div>';
+        };
+
+        $panelCls1 = ($assistRootOk && $bprRootOk) ? 'ready' : ($assistRootOk || $bprRootOk ? 'warn' : 'error');
+        ?>
+
+        <div class="det-panel">
+            <div class="det-panel-header <?= $panelCls1 ?>">
+                📂 Path Root
+                <span class="det-badge <?= $panelCls1 ?>"><?= $panelCls1 === 'ready' ? 'READY' : ($panelCls1 === 'warn' ? 'SEBAGIAN' : 'TIDAK DITEMUKAN') ?></span>
+            </div>
+            <div class="det-rows">
+                <div class="det-section-label">assist-switching_v3_pro</div>
+                <?php $row(
+                    $assistRootOk ? '✅' : '❌',
+                    'assist_root',
+                    $assistRootOk ? $_ASSIST_ROOT : 'Tidak ditemukan',
+                    $assistRootOk ? 'ok' : 'err',
+                    $assistRootOk ? 'FOUND' : 'MISSING',
+                    $assistRootOk ? 'ok' : 'err'
+                ); ?>
+                <?php $row(
+                    $localCfgOk ? '✅' : '⚠️',
+                    'local_config.php',
+                    $localCfgOk ? 'Terbaca (' . count($_LOCAL_CONFIG) . ' keys)' : 'Tidak ditemukan — URL pakai default',
+                    $localCfgOk ? 'ok' : 'warn',
+                    $localCfgOk ? 'OK' : 'DEFAULT',
+                    $localCfgOk ? 'ok' : 'warn'
+                ); ?>
+                <?php $row(
+                    $cacheFileOk ? '✅' : '❌',
+                    'cache snap_ft_bdi',
+                    $cacheFileOk ? basename(CACHE_FILE_BIFAST) : 'Belum ada — KODE_AGEN tidak dapat dibaca',
+                    $cacheFileOk ? 'ok' : 'err',
+                    $cacheFileOk ? 'ADA' : 'MISSING',
+                    $cacheFileOk ? 'ok' : 'err'
+                ); ?>
+
+                <div class="det-section-label">assist-bpr.net</div>
+                <?php $row(
+                    $bprRootOk ? '✅' : '⚠️',
+                    'assist_bpr_root',
+                    $bprRootOk ? $_ASSIST_BPR_ROOT : 'Tidak ditemukan — fallback ke .assist.env',
+                    $bprRootOk ? 'ok' : 'warn',
+                    $bprRootOk ? 'FOUND' : 'MISSING',
+                    $bprRootOk ? 'ok' : 'warn'
+                ); ?>
+                <?php $row(
+                    $envFileOk ? '✅' : '⚠️',
+                    'env file aktif',
+                    $envFileOk
+                        ? basename($_BPR_ENV['_env_file'] ?? ($_ASSIST_ENV['_env_file'] ?? '-'))
+                        : 'Tidak ada — isi manual via .assist.env',
+                    $envFileOk ? 'ok' : 'warn',
+                    $envFileOk ? 'LOADED' : 'NONE',
+                    $envFileOk ? 'ok' : 'warn'
+                ); ?>
+            </div>
+        </div>
+
+        <?php $panelCls2 = ($kodeAgenOk && $mftfiOk) ? 'ready' : ($kodeAgenOk || $mftfiOk ? 'warn' : 'error'); ?>
+        <div class="det-panel">
+            <div class="det-panel-header <?= $panelCls2 ?>">
+                🏦 Data Agen
+                <span class="det-badge <?= $panelCls2 ?>"><?= $kodeAgenOk ? 'TERDETEKSI' : 'BELUM ADA' ?></span>
+            </div>
+            <div class="det-rows">
+                <?php $row(
+                    $kodeAgenOk ? '✅' : '❌',
+                    'KODE_AGEN',
+                    $kodeAgenOk ? KODE_AGEN : 'Tidak terdeteksi — butuh cache snap_ft_bdi.cache',
+                    $kodeAgenOk ? 'ok' : 'err',
+                    $kodeAgenOk ? 'AUTO' : 'MISSING',
+                    $kodeAgenOk ? 'ok' : 'err'
+                ); ?>
+                <?php $row(
+                    $mftfiOk ? '✅' : '⚠️',
+                    'MFTFI',
+                    MFTFI !== '' ? MFTFI . ($mftfiOk ? ' (dari cache)' : ' (default)') : '—',
+                    $mftfiOk ? 'ok' : 'warn',
+                    $mftfiOk ? 'AUTO' : 'DEFAULT',
+                    $mftfiOk ? 'ok' : 'warn'
+                ); ?>
+                <?php $row(
+                    $corpIdOk ? '✅' : '⚠️',
+                    'OAUTH_CORPORATE_ID',
+                    $corpIdOk ? OAUTH_CORPORATE_ID : 'Kosong (opsional)',
+                    $corpIdOk ? 'ok' : 'warn',
+                    $corpIdOk ? 'AUTO' : 'OPSIONAL',
+                    $corpIdOk ? 'ok' : 'info'
+                ); ?>
+            </div>
+        </div>
+
+        <?php
+        $panelCls3 = ($oauthIdOk && $oauthSecOk && $oauthUserOk) ? 'ready' : ($oauthIdOk || $oauthUserOk ? 'warn' : 'error');
+        $srcLabel  = '';
+        if (!empty($_BPR_ENV['_env_file']))        $srcLabel = 'bpr-env: ' . basename($_BPR_ENV['_env_file']);
+        elseif (!empty($_ASSIST_ENV['_env_file'])) $srcLabel = '.assist.env';
+        ?>
+        <div class="det-panel">
+            <div class="det-panel-header <?= $panelCls3 ?>">
+                🔑 OAuth Credentials
+                <?php if ($srcLabel): ?>
+                <span style="font-size:.72rem;opacity:.75;margin-left:4px;">← <?= htmlspecialchars($srcLabel) ?></span>
+                <?php endif; ?>
+                <span class="det-badge <?= $panelCls3 ?>"><?= $panelCls3 === 'ready' ? 'LENGKAP' : ($panelCls3 === 'warn' ? 'SEBAGIAN' : 'KOSONG') ?></span>
+            </div>
+            <div class="det-rows">
+                <?php $row(
+                    $oauthIdOk ? '✅' : '❌',
+                    'OAUTH_CLIENT_ID',
+                    $oauthIdOk ? OAUTH_CLIENT_ID : 'Belum diisi',
+                    $oauthIdOk ? 'ok' : 'err',
+                    $oauthIdOk ? 'OK' : 'MISSING',
+                    $oauthIdOk ? 'ok' : 'err'
+                ); ?>
+                <?php $row(
+                    $oauthSecOk ? '✅' : '❌',
+                    'OAUTH_CLIENT_SECRET',
+                    $oauthSecOk ? substr(OAUTH_CLIENT_SECRET, 0, 8) . str_repeat('•', 12) : 'Belum diisi',
+                    $oauthSecOk ? 'ok' : 'err',
+                    $oauthSecOk ? 'OK' : 'MISSING',
+                    $oauthSecOk ? 'ok' : 'err'
+                ); ?>
+                <?php $row(
+                    $oauthUserOk ? '✅' : '❌',
+                    'OAUTH_USERNAME',
+                    $oauthUserOk ? OAUTH_USERNAME : 'Belum diisi',
+                    $oauthUserOk ? 'ok' : 'err',
+                    $oauthUserOk ? 'OK' : 'MISSING',
+                    $oauthUserOk ? 'ok' : 'err'
+                ); ?>
+                <?php $row(
+                    $oauthPassOk ? '✅' : '❌',
+                    'OAUTH_PASSWORD',
+                    $oauthPassOk ? str_repeat('•', 8) : 'Belum diisi',
+                    $oauthPassOk ? 'ok' : 'err',
+                    $oauthPassOk ? 'OK' : 'MISSING',
+                    $oauthPassOk ? 'ok' : 'err'
+                ); ?>
+                <?php $row(
+                    $de061Ok ? '✅' : '⚠️',
+                    'DE061_SIM_SERIAL',
+                    $de061Ok ? DE061_SIM_SERIAL : 'Kosong (opsional)',
+                    $de061Ok ? 'ok' : 'warn',
+                    $de061Ok ? 'OK' : 'OPSIONAL',
+                    $de061Ok ? 'ok' : 'info'
+                ); ?>
+                <?php $row(
+                    $rsaKeyOk ? '✅' : '⚠️',
+                    'OAUTH_TOKEN_PRIVATE',
+                    $rsaKeyOk ? 'RSA key tersedia (' . strlen(OAUTH_TOKEN_PRIVATE) . ' chars)' : 'Tidak ada (opsional)',
+                    $rsaKeyOk ? 'ok' : 'warn',
+                    $rsaKeyOk ? 'RSA' : 'OPSIONAL',
+                    $rsaKeyOk ? 'ok' : 'info'
+                ); ?>
+            </div>
+        </div>
+
+        <div class="det-panel">
+            <div class="det-panel-header ready">
+                🌐 Endpoint &amp; Identity
+                <span class="det-badge ready">READY</span>
+            </div>
+            <div class="det-rows">
+                <?php $row('✅', 'URL_GET_TOKEN', URL_GET_TOKEN, 'ok', $urlTokenOk ? 'CONFIG' : 'DEFAULT', $urlTokenOk ? 'ok' : 'info'); ?>
+                <?php $row('✅', 'URL_DIGITAL (BIFAST)', URL_DIGITAL, 'ok', $urlDigitalOk ? 'CONFIG' : 'DEFAULT', $urlDigitalOk ? 'ok' : 'info'); ?>
+                <?php $row($cicdOk ? '✅' : '⚠️', 'CICD Identity', substr(CICD, 0, 20) . '…', 'ok', $cicdOk ? 'CONFIG' : 'DEFAULT', $cicdOk ? 'ok' : 'info'); ?>
+            </div>
+        </div>
+
+        <div class="alert alert-info" style="margin-bottom:0;font-size:.84rem;">
+            <span class="ai">⚡</span>
+            <div>
+                Cache BIFAST: <code style="background:#bbf7d0;padding:1px 5px;border-radius:3px;">snap_ft_bdi.cache</code>
+                — berbeda dari TF: <code>snap_tf_bank_permata.cache</code>.
+                DE048 dikirim: <code style="background:#bbf7d0;padding:1px 5px;border-radius:3px;">0601*1001*INQBIFAST~~BLTRFAG</code>.
+                <?php if (!$isConfigured): ?>
+                <br><strong style="color:#b45309;">⚠️ Buat <code>.assist.env</code>:
+                OAUTH_CLIENT_ID, OAUTH_CLIENT_SECRET, OAUTH_USERNAME, OAUTH_PASSWORD.</strong>
                 <?php endif; ?>
             </div>
-
-            <div class="config-grid">
-                <div class="cfg">
-                    <div class="cg-l">Token URL</div>
-                    <div class="cg-v ok" title="<?= htmlspecialchars(URL_GET_TOKEN) ?>">myassist.sis1.net ✓</div>
-                </div>
-                <div class="cfg">
-                    <div class="cg-l">Digital Server</div>
-                    <div class="cg-v ok" title="<?= htmlspecialchars(URL_DIGITAL) ?>">digital.sis1.net/dgl ✓</div>
-                </div>
-                <div class="cfg">
-                    <div class="cg-l">mftfi (BIFAST)</div>
-                    <div class="cg-v ok"><?= htmlspecialchars(MFTFI) ?></div>
-                </div>
-                <div class="cfg">
-                    <div class="cg-l">Kode Agen</div>
-                    <div class="cg-v <?= KODE_AGEN !== '' ? 'ok' : 'err' ?>">
-                        <?= KODE_AGEN !== '' ? htmlspecialchars(KODE_AGEN) : '⚠ Tidak terdeteksi' ?>
-                    </div>
-                </div>
-                <div class="cfg">
-                    <div class="cg-l">OAuth Client ID</div>
-                    <div class="cg-v <?= OAUTH_CLIENT_ID !== '' ? 'ok' : 'warn' ?>">
-                        <?= OAUTH_CLIENT_ID !== '' ? '✓ Terisi (.assist.env)' : '— Isi di .assist.env' ?>
-                    </div>
-                </div>
-                <div class="cfg">
-                    <div class="cg-l">cicd Identity</div>
-                    <div class="cg-v ok" style="font-size:.68rem;" title="<?= htmlspecialchars(CICD) ?>"><?= substr(CICD, 0, 16) ?>…</div>
-                </div>
-                <div class="cfg">
-                    <div class="cg-l">OAuth Username</div>
-                    <div class="cg-v <?= OAUTH_USERNAME !== '' ? 'ok' : 'warn' ?>">
-                        <?= OAUTH_USERNAME !== '' ? '✓ ' . htmlspecialchars(substr(OAUTH_USERNAME, 0, 8)) . '…' : '— Isi di .assist.env' ?>
-                    </div>
-                </div>
-                <div class="cfg">
-                    <div class="cg-l">Cache File BIFAST</div>
-                    <div class="cg-v <?= file_exists(CACHE_FILE_BIFAST) ? 'ok' : 'warn' ?>" style="font-size:.7rem;">
-                        snap_ft_bdi.cache<br>
-                        <?= file_exists(CACHE_FILE_BIFAST) ? '✓ Ada' : '— Belum ada' ?>
-                    </div>
-                </div>
-                <div class="cfg">
-                    <div class="cg-l">DE061 / SIMSerial</div>
-                    <div class="cg-v <?= DE061_SIM_SERIAL !== '' ? 'ok' : 'warn' ?>">
-                        <?= DE061_SIM_SERIAL !== '' ? '✓ Terisi' : '— Opsional' ?>
-                    </div>
-                </div>
-            </div>
-            <div class="alert alert-info" style="margin-bottom:0;font-size:.84rem;">
-                <span class="ai">ℹ️</span>
-                <div>
-                    Cache BIFAST menggunakan suffix <code style="background:#bbf7d0;padding:1px 5px;border-radius:3px;">snap_ft_bdi.cache</code>
-                    (berbeda dari TF Permata: <code>snap_tf_bank_permata.cache</code>).
-                    DE048: <code style="background:#bbf7d0;padding:1px 5px;border-radius:3px;">0601*1001*INQBIFAST~~BLTRFAG</code>.
-                    <?php if (!$isConfigured): ?>
-                    <br><strong style="color:#b45309;">Buat <code>.assist.env</code> dengan isi: OAUTH_CLIENT_ID, OAUTH_CLIENT_SECRET, OAUTH_USERNAME, OAUTH_PASSWORD.</strong>
-                    <?php endif; ?>
-                </div>
-            </div>
+        </div>
         </div>
     </div>
 

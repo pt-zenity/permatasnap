@@ -217,60 +217,140 @@ function detectAssistBprRoot(): string {
  *
  * @param string $assistBprRoot  Path root assist-bpr.net (dari detectAssistBprRoot())
  * @param string $rawKode        Kode numerik agen, mis. "000268" (dari cache filename)
+ *
+ * Urutan pencarian kandidat:
+ *   1. {envDir}/{rawKode}_.env          — kode spesifik dari cache filename
+ *   2. Semua file env numerik [0-9]*.env  diurutkan mtime desc, dicocokkan log_name dulu
+ *   3. File env hostname-pattern (bpr.*.env, *.net.env, dll) — mencakup bpr.myassist.id.env
+ *
+ * Matching log_name:
+ *   Setiap file env numerik dapat berisi "log_name = {hostname}".
+ *   Jika server hostname cocok dengan log_name, file itu diprioritaskan.
+ *
+ * Field yang dikembalikan:
+ *   OAUTH_CLIENT_ID, OAUTH_CLIENT_SECRET, OAUTH_USERNAME, OAUTH_PASSWORD,
+ *   OAUTH_SERVER_URI, OAUTH_CORPORATE_ID, OAUTH_TOKEN_PRIVATE (RSA key jika ada),
+ *   _env_file, _source
  */
 function detectFromAssistBprEnv(string $assistBprRoot, string $rawKode = ''): array {
     $envDir = $assistBprRoot . '/env';
     if (!is_dir($envDir)) return [];
 
-    // Daftar kandidat file: kode spesifik dulu, lalu semua file numerik
-    $candidates = [];
-    if (!empty($rawKode)) {
-        $candidates[] = $envDir . '/' . $rawKode . '_.env';
-        // Coba juga tanpa leading zeros (jarang, tapi antisipasi)
-        $noLeading = ltrim($rawKode, '0');
-        if ($noLeading !== $rawKode && $noLeading !== '') {
-            $candidates[] = $envDir . '/' . $noLeading . '_.env';
-        }
-    }
-    // Fallback: semua file env numerik, diurutkan (terbaru dulu)
-    $allNumericEnv = glob($envDir . '/[0-9]*.env') ?: [];
-    usort($allNumericEnv, fn($a, $b) => filemtime($b) - filemtime($a));
-    $candidates = array_merge($candidates, $allNumericEnv);
-    // Hapus duplikat
-    $candidates = array_unique($candidates);
-
-    foreach ($candidates as $path) {
-        if (!file_exists($path)) continue;
+    // ── Helper: parse satu env file ke array raw ──────────────
+    $parseEnvFile = function (string $path): array {
+        if (!file_exists($path)) return [];
         $lines = file($path, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
-        if ($lines === false) continue;
+        if ($lines === false) return [];
         $raw = [];
         foreach ($lines as $line) {
             $line = trim($line);
             if ($line === '' || $line[0] === '#') continue;
             if (strpos($line, '=') === false) continue;
+            // Format assist-bpr: "key = value" (dengan spasi di sekitar =)
             [$k, $v] = explode('=', $line, 2);
-            // Format assist-bpr: "key = value" → trim spasi dari key & value
             $raw[trim($k)] = trim($v);
         }
-        // File valid harus punya auth_client_id atau OAUTH_CLIENT_ID
-        if (empty($raw['auth_client_id']) && empty($raw['OAUTH_CLIENT_ID'])) continue;
+        return $raw;
+    };
 
-        // Resolusi URL OAuth: auth_server_uri lebih spesifik, base_url_auth sebagai fallback
+    // ── Helper: buat result array dari $raw ────────────────────
+    $buildResult = function (array $raw, string $path) use ($parseEnvFile, $envDir): array {
+        // Resolusi URL OAuth: auth_server_uri > base_url_auth
         $oauthServerUri = rtrim(
             $raw['auth_server_uri'] ?? $raw['base_url_auth'] ?? '',
             '/'
         );
-
+        // RSA private key — hanya ada di bpr.myassist.id.env (OAUTH_TOKEN_PRIVATE / oauth_token_private)
+        // Format dalam file: backslash-n literal → ganti ke newline sesungguhnya
+        $tokenPrivate = $raw['oauth_token_private'] ?? $raw['OAUTH_TOKEN_PRIVATE'] ?? '';
+        if (!empty($tokenPrivate)) {
+            $tokenPrivate = str_replace('\n', "\n", $tokenPrivate);
+        }
         return [
-            'OAUTH_CLIENT_ID'     => $raw['auth_client_id']    ?? $raw['OAUTH_CLIENT_ID'] ?? '',
-            'OAUTH_CLIENT_SECRET' => $raw['auth_client_secret'] ?? '',
-            'OAUTH_USERNAME'      => $raw['username']           ?? '',
-            'OAUTH_PASSWORD'      => $raw['password']           ?? '',
-            'OAUTH_SERVER_URI'    => $oauthServerUri,
-            '_env_file'           => $path,
-            '_source'             => 'assist-bpr.net/env',
+            'OAUTH_CLIENT_ID'      => $raw['auth_client_id']    ?? $raw['OAUTH_CLIENT_ID']     ?? '',
+            'OAUTH_CLIENT_SECRET'  => $raw['auth_client_secret'] ?? $raw['OAUTH_CLIENT_SECRET'] ?? '',
+            'OAUTH_USERNAME'       => $raw['username']           ?? '',
+            'OAUTH_PASSWORD'       => $raw['password']           ?? '',
+            'OAUTH_SERVER_URI'     => $oauthServerUri,
+            'OAUTH_CORPORATE_ID'   => $raw['auth_corporate_id']  ?? $raw['OAUTH_CORPORATE_ID']  ?? '',
+            'OAUTH_TOKEN_PRIVATE'  => $tokenPrivate,
+            '_env_file'            => $path,
+            '_source'              => 'assist-bpr.net/env',
         ];
+    };
+
+    // ── Deteksi hostname server saat ini ──────────────────────
+    // Digunakan untuk mencocokkan log_name di env files
+    $serverHost = '';
+    if (!empty($_SERVER['HTTP_HOST'])) {
+        // Hilangkan port jika ada (mis. "bpr.ams.sis1.net:80" → "bpr.ams.sis1.net")
+        $serverHost = strtolower(explode(':', $_SERVER['HTTP_HOST'])[0]);
+    } elseif (!empty($_SERVER['SERVER_NAME'])) {
+        $serverHost = strtolower($_SERVER['SERVER_NAME']);
+    } else {
+        // CLI: gethostname() → hostname OS
+        $hn = @gethostname();
+        if (!empty($hn)) $serverHost = strtolower($hn);
     }
+
+    // ── Langkah 1: kode spesifik dari cache filename ──────────
+    if (!empty($rawKode)) {
+        $specificPath = $envDir . '/' . $rawKode . '_.env';
+        $raw = $parseEnvFile($specificPath);
+        if (!empty($raw['auth_client_id']) || !empty($raw['OAUTH_CLIENT_ID'])) {
+            return $buildResult($raw, $specificPath);
+        }
+        // Coba tanpa leading zeros (mis. "000087" → "87")
+        $noLeading = ltrim($rawKode, '0');
+        if ($noLeading !== $rawKode && $noLeading !== '') {
+            $altPath = $envDir . '/' . $noLeading . '_.env';
+            $raw = $parseEnvFile($altPath);
+            if (!empty($raw['auth_client_id']) || !empty($raw['OAUTH_CLIENT_ID'])) {
+                return $buildResult($raw, $altPath);
+            }
+        }
+    }
+
+    // ── Langkah 2: hostname matching via log_name ─────────────
+    // Scan semua file numerik; jika log_name cocok dengan server hostname → prioritas tinggi
+    if (!empty($serverHost)) {
+        $allNumericEnv = glob($envDir . '/[0-9]*.env') ?: [];
+        foreach ($allNumericEnv as $path) {
+            $raw = $parseEnvFile($path);
+            if (empty($raw)) continue;
+            $logName = strtolower(trim($raw['log_name'] ?? ''));
+            if ($logName === '' || $logName !== $serverHost) continue;
+            // Cocok! File ini milik server yang sedang berjalan
+            if (!empty($raw['auth_client_id']) || !empty($raw['OAUTH_CLIENT_ID'])) {
+                return $buildResult($raw, $path);
+            }
+        }
+    }
+
+    // ── Langkah 3: fallback semua file numerik, mtime desc ────
+    $allNumericEnv = glob($envDir . '/[0-9]*.env') ?: [];
+    usort($allNumericEnv, fn($a, $b) => filemtime($b) - filemtime($a));
+    foreach ($allNumericEnv as $path) {
+        $raw = $parseEnvFile($path);
+        if (empty($raw['auth_client_id']) && empty($raw['OAUTH_CLIENT_ID'])) continue;
+        return $buildResult($raw, $path);
+    }
+
+    // ── Langkah 4: file env hostname-pattern (non-numerik) ────
+    // Contoh: bpr.myassist.id.env, sis1.cloud.env, dll.
+    // Glob semua *.env, exclude file numerik yang sudah di-scan
+    $allEnvFiles  = glob($envDir . '/*.env') ?: [];
+    $numericPaths = array_fill_keys($allNumericEnv, true);
+    foreach ($allEnvFiles as $path) {
+        if (isset($numericPaths[$path])) continue;   // sudah di-scan di langkah 3
+        $basename = basename($path);
+        // Skip file yang diketahui kosong (berisi IP dengan port, atau nama sangat pendek)
+        if (strpos($basename, ':') !== false) continue;
+        $raw = $parseEnvFile($path);
+        if (empty($raw['auth_client_id']) && empty($raw['OAUTH_CLIENT_ID'])) continue;
+        return $buildResult($raw, $path);
+    }
+
     return [];
 }
 
@@ -322,14 +402,19 @@ $_oauthClientSecret = $_ASSIST_ENV['OAUTH_CLIENT_SECRET'] ?? '';
 $_oauthUsername     = $_ASSIST_ENV['OAUTH_USERNAME']      ?? '';
 $_oauthPassword     = $_ASSIST_ENV['OAUTH_PASSWORD']      ?? '';
 $_de061             = $_ASSIST_ENV['DE061_SIM_SERIAL']     ?? '';
+$_oauthCorporateId  = '';           // auth_corporate_id dari env BPR
+$_oauthTokenPrivate = '';           // RSA private key dari bpr.myassist.id.env
 $_oauthSource       = !empty($_oauthClientId) ? '.assist.env' : '';
 
 // Sumber 2: assist-bpr.net/env/{kode}_.env — fallback jika .assist.env kosong
 if (empty($_oauthClientId) && !empty($_BPR_ENV['OAUTH_CLIENT_ID'])) {
+    // Full override dari BPR env
     $_oauthClientId     = $_BPR_ENV['OAUTH_CLIENT_ID'];
     $_oauthClientSecret = $_BPR_ENV['OAUTH_CLIENT_SECRET'] ?? '';
     $_oauthUsername     = $_BPR_ENV['OAUTH_USERNAME']      ?? '';
     $_oauthPassword     = $_BPR_ENV['OAUTH_PASSWORD']      ?? '';
+    $_oauthCorporateId  = $_BPR_ENV['OAUTH_CORPORATE_ID']  ?? '';
+    $_oauthTokenPrivate = $_BPR_ENV['OAUTH_TOKEN_PRIVATE'] ?? '';
     // DE061 tetap dari .assist.env jika ada; assist-bpr tidak menyimpan DE061
     $_oauthSource       = 'assist-bpr.net/env';
 } elseif (empty($_oauthClientSecret) && !empty($_BPR_ENV['OAUTH_CLIENT_SECRET'])) {
@@ -339,17 +424,22 @@ if (empty($_oauthClientId) && !empty($_BPR_ENV['OAUTH_CLIENT_ID'])) {
     if (empty($_oauthPassword)) $_oauthPassword = $_BPR_ENV['OAUTH_PASSWORD'] ?? '';
     $_oauthSource .= '+assist-bpr.net/env';
 }
+// Corporate ID + RSA key selalu diisi dari BPR env jika belum ada (field tambahan)
+if (empty($_oauthCorporateId)  && !empty($_BPR_ENV['OAUTH_CORPORATE_ID']))  $_oauthCorporateId  = $_BPR_ENV['OAUTH_CORPORATE_ID'];
+if (empty($_oauthTokenPrivate) && !empty($_BPR_ENV['OAUTH_TOKEN_PRIVATE'])) $_oauthTokenPrivate = $_BPR_ENV['OAUTH_TOKEN_PRIVATE'];
 
 $_envFile = !empty($_oauthSource) && str_contains($_oauthSource, 'bpr')
     ? ($_BPR_ENV['_env_file'] ?? ($_ASSIST_ENV['_env_file'] ?? ''))
     : ($_ASSIST_ENV['_env_file'] ?? '');
 
-$_DETECTION_LOG['assist_bpr_root']   = !empty($_ASSIST_BPR_ROOT) ? '✅ ' . $_ASSIST_BPR_ROOT : '— tidak ditemukan';
-$_DETECTION_LOG['oauth_env_file']    = !empty($_envFile)         ? '✅ ' . $_envFile          : '⚠️ env tidak ditemukan';
-$_DETECTION_LOG['oauth_source']      = !empty($_oauthSource)     ? '✅ ' . $_oauthSource      : '❌ tidak ada sumber OAuth';
-$_DETECTION_LOG['oauth_client_id']   = !empty($_oauthClientId)   ? '✅ terisi (' . $_oauthSource . ')' : '❌ belum diisi';
-$_DETECTION_LOG['oauth_username']    = !empty($_oauthUsername)   ? '✅ terisi (' . $_oauthSource . ')' : '❌ belum diisi';
-$_DETECTION_LOG['de061_sim_serial']  = !empty($_de061)           ? '✅ terisi dari .assist.env' : '⚠️ kosong';
+$_DETECTION_LOG['assist_bpr_root']      = !empty($_ASSIST_BPR_ROOT)     ? '✅ ' . $_ASSIST_BPR_ROOT      : '— tidak ditemukan';
+$_DETECTION_LOG['oauth_env_file']       = !empty($_envFile)             ? '✅ ' . $_envFile               : '⚠️ env tidak ditemukan';
+$_DETECTION_LOG['oauth_source']         = !empty($_oauthSource)         ? '✅ ' . $_oauthSource           : '❌ tidak ada sumber OAuth';
+$_DETECTION_LOG['oauth_client_id']      = !empty($_oauthClientId)       ? '✅ terisi (' . $_oauthSource . ')' : '❌ belum diisi';
+$_DETECTION_LOG['oauth_username']       = !empty($_oauthUsername)       ? '✅ terisi (' . $_oauthSource . ')' : '❌ belum diisi';
+$_DETECTION_LOG['oauth_corporate_id']   = !empty($_oauthCorporateId)    ? '✅ ' . $_oauthCorporateId      : '⚠️ kosong (opsional)';
+$_DETECTION_LOG['oauth_token_private']  = !empty($_oauthTokenPrivate)   ? '✅ RSA key terdeteksi'         : '⚠️ tidak ada (opsional)';
+$_DETECTION_LOG['de061_sim_serial']     = !empty($_de061)               ? '✅ terisi dari .assist.env'    : '⚠️ kosong';
 
 // ============================================================
 // DEFINISIKAN KONSTANTA (dari hasil auto-detection)
@@ -363,11 +453,13 @@ define('URL_DIGITAL_SS', $_urlDigitalSS);
 define('CICD',           $_cicd);
 define('MFTFI',          $_mftfi);
 define('KODE_AGEN',      $_kodeAgen);
-define('OAUTH_CLIENT_ID',     $_oauthClientId);
-define('OAUTH_CLIENT_SECRET', $_oauthClientSecret);
-define('OAUTH_USERNAME',      $_oauthUsername);
-define('OAUTH_PASSWORD',      $_oauthPassword);
-define('DE061_SIM_SERIAL',    $_de061);
+define('OAUTH_CLIENT_ID',      $_oauthClientId);
+define('OAUTH_CLIENT_SECRET',  $_oauthClientSecret);
+define('OAUTH_USERNAME',       $_oauthUsername);
+define('OAUTH_PASSWORD',       $_oauthPassword);
+define('OAUTH_CORPORATE_ID',   $_oauthCorporateId);
+define('OAUTH_TOKEN_PRIVATE',  $_oauthTokenPrivate);
+define('DE061_SIM_SERIAL',     $_de061);
 
 // ── Token Cache (CDS pattern) ────────────────────────────────
 // Cache dir: ikuti struktur asli jika assist root ditemukan, fallback ke __DIR__
@@ -388,7 +480,8 @@ define('DEBUG_MODE',   true);
 unset($_myAssistBase, $_urlGetToken, $_urlCekToken, $_urlRfzToken,
       $_urlDigital, $_urlDigitalSS, $_cicd, $_mftfi, $_mftfiFromCache,
       $_kodeAgen, $_rawKode, $_cacheDir, $_envFile, $_oauthSource,
-      $_oauthClientId, $_oauthClientSecret, $_oauthUsername, $_oauthPassword, $_de061,
+      $_oauthClientId, $_oauthClientSecret, $_oauthUsername, $_oauthPassword,
+      $_oauthCorporateId, $_oauthTokenPrivate, $_de061,
       $_ASSIST_BPR_ROOT, $_RAW_KODE_TF, $_BPR_ENV);
 
 // ============================================================

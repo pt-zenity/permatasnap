@@ -536,12 +536,15 @@ define('CURL_TIMEOUT', 30);
 define('DEBUG_MODE',   true);
 
 // Bersihkan variabel sementara
+// Bersihkan variabel sementara yang sudah tidak dipakai
+// CATATAN: $_ASSIST_ROOT, $_LOCAL_CONFIG, $_CACHE_TF, $_ASSIST_ENV,
+//          $_ASSIST_BPR_ROOT, dan $_BPR_ENV TIDAK di-unset —
+//          masih dipakai oleh panel Status Auto-Detection di HTML bawah.
 unset($_myAssistBase, $_urlGetToken, $_urlCekToken, $_urlRfzToken,
       $_urlDigital, $_urlDigitalSS, $_cicd, $_mftfi, $_mftfiFromCache,
       $_kodeAgen, $_rawKode, $_cacheDir, $_envFile, $_oauthSource,
       $_oauthClientId, $_oauthClientSecret, $_oauthUsername, $_oauthPassword,
-      $_oauthCorporateId, $_oauthTokenPrivate, $_de061,
-      $_ASSIST_BPR_ROOT, $_RAW_KODE_TF, $_BPR_ENV);
+      $_oauthCorporateId, $_oauthTokenPrivate, $_de061, $_RAW_KODE_TF);
 
 // ============================================================
 // FUNGSI HELPER
@@ -1117,6 +1120,9 @@ $isConfigured = (KODE_AGEN !== '' && OAUTH_CLIENT_ID !== '' && OAUTH_USERNAME !=
             font-size: .72rem;
             letter-spacing: .4px;
         }
+        .card-header .ch-badge.status-ready { background: #16a34a; color: #fff; font-weight: 800; }
+        .card-header .ch-badge.status-warn  { background: #d97706; color: #fff; font-weight: 800; }
+        .card-header .ch-badge.status-error { background: #dc2626; color: #fff; font-weight: 800; }
         .card-body { padding: 24px; }
 
         /* ── Config Info ── */
@@ -1363,7 +1369,7 @@ $isConfigured = (KODE_AGEN !== '' && OAUTH_CLIENT_ID !== '' && OAUTH_USERNAME !=
                 $overallClass = $totalErr > 0 ? 'error' : ($totalWarn > 0 ? 'warn' : 'ready');
                 $overallLabel = $totalErr > 0 ? '❌ Belum Siap' : ($totalWarn > 0 ? '⚠️ Sebagian' : '✅ Siap');
             ?>
-            <span class="ch-badge"><?= $overallLabel ?></span>
+            <span class="ch-badge status-<?= $overallClass ?>"><?= $overallLabel ?></span>
         </div>
         <div class="card-body" style="padding:18px 24px;">
 

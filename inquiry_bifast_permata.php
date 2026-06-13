@@ -157,11 +157,14 @@ function loadAssistEnv(): array {
  * Markers: direktori env/ berisi file *.env + bin/connect.php
  *
  * Urutan pencarian:
- *   1. Known absolute path: /var/www/prg/app/mvc/assist-bpr.net  (produksi)
+ *   1. Known absolute paths (produksi, dicek berurutan):
+ *        /var/www/prg/app/assist/bpr-myassist/assist-bpr.net
+ *        /var/www/prg/app/mvc/assist-bpr.net
  *   2. Traversal dari __DIR__ ke atas (maks 8 level):
  *      a. Direktori itu sendiri memiliki env/ + bin/connect.php
  *      b. Subdirektori bernama assist-bpr.net / assist-bpr / assistbpr
  *      c. Subdirektori pola app/mvc/assist-bpr.net
+ *      d. Subdirektori pola app/assist/bpr-myassist/assist-bpr.net
  */
 function detectAssistBprRoot(): string {
     // ── Helper validasi root ──────────────────────────────────
@@ -172,8 +175,10 @@ function detectAssistBprRoot(): string {
         return !empty($envFiles);
     };
 
-    // ── Langkah 1: known absolute path (produksi) ─────────────
+    // ── Langkah 1: known absolute paths (produksi) ────────────
+    // Urutan: path paling spesifik/baru dulu
     $knownPaths = [
+        '/var/www/prg/app/assist/bpr-myassist/assist-bpr.net',
         '/var/www/prg/app/mvc/assist-bpr.net',
     ];
     foreach ($knownPaths as $known) {
@@ -193,9 +198,15 @@ function detectAssistBprRoot(): string {
             if ($isValidRoot($candidate)) return $candidate;
         }
 
-        // 2c. Subdirektori app/mvc/assist-bpr.net (struktur /var/www/prg/...)
+        // 2c. Subdirektori app/mvc/assist-bpr.net (struktur /var/www/prg/app/mvc/)
         foreach ($subNames as $sub) {
             $candidate = $dir . '/app/mvc/' . $sub;
+            if ($isValidRoot($candidate)) return $candidate;
+        }
+
+        // 2d. Subdirektori app/assist/bpr-myassist/assist-bpr.net
+        foreach ($subNames as $sub) {
+            $candidate = $dir . '/app/assist/bpr-myassist/' . $sub;
             if ($isValidRoot($candidate)) return $candidate;
         }
 

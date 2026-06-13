@@ -141,19 +141,29 @@ function detectFromCacheTF(string $assistRoot): array {
     $cacheDir = $assistRoot . '/storage/cds/cache';
     if (!is_dir($cacheDir)) return ['kode_agen' => '', 'mftfi' => ''];
 
+    // ── Langkah 1: cari snap_tf_bank_permata (spesifik untuk TF Permata) ──
     $files = glob($cacheDir . '/cds-auth-a-*-snap_tf_bank_permata.cache');
+
+    // ── Langkah 2: fallback — cari semua snap_* (snap_ft_bdi, dll.) ────────
+    //    Diperlukan untuk agen yang pakai snap_ft_bdi tapi belum punya
+    //    snap_tf_bank_permata.cache (mis. A-000300)
+    if (empty($files)) {
+        $files = glob($cacheDir . '/cds-auth-a-*-snap_*.cache');
+    }
+
     if (empty($files)) return ['kode_agen' => '', 'mftfi' => ''];
 
     // Ambil file terbaru (paling baru dimodifikasi)
     usort($files, fn($a, $b) => filemtime($b) - filemtime($a));
     $fname = basename($files[0]);
 
-    // Parse: cds-auth-a-{numerik}_{mftfi}-snap_tf_bank_permata.cache
-    if (preg_match('/^cds-auth-a-(\d+)_(\w+)-snap_tf_bank_permata\.cache$/', $fname, $m)) {
+    // Parse: cds-auth-a-{numerik}_{mftfi}-snap_*.cache
+    if (preg_match('/^cds-auth-a-(\d+)_(\w+)-snap_/', $fname, $m)) {
         return [
-            'kode_agen' => 'A-' . $m[1],   // ex: "A-000268"
-            'mftfi'     => $m[2],            // ex: "0017"
-            'raw_kode'  => $m[1],            // ex: "000268"
+            'kode_agen'  => 'A-' . $m[1],   // ex: "A-000268" / "A-000300"
+            'mftfi'      => $m[2],            // ex: "0017" / "0024"
+            'raw_kode'   => $m[1],            // ex: "000268" / "000300"
+            'cache_file' => $fname,           // nama file asli untuk info
         ];
     }
 
@@ -326,13 +336,17 @@ function detectFromAssistBprEnv(string $assistBprRoot, string $rawKode = ''): ar
             $tokenPrivate = str_replace('\n', "\n", $tokenPrivate);
         }
         return [
-            'OAUTH_CLIENT_ID'      => $raw['auth_client_id']    ?? $raw['OAUTH_CLIENT_ID']     ?? '',
+            'OAUTH_CLIENT_ID'      => $raw['auth_client_id']     ?? $raw['OAUTH_CLIENT_ID']     ?? '',
             'OAUTH_CLIENT_SECRET'  => $raw['auth_client_secret'] ?? $raw['OAUTH_CLIENT_SECRET'] ?? '',
             'OAUTH_USERNAME'       => $raw['username']           ?? '',
             'OAUTH_PASSWORD'       => $raw['password']           ?? '',
             'OAUTH_SERVER_URI'     => $oauthServerUri,
             'OAUTH_CORPORATE_ID'   => $raw['auth_corporate_id']  ?? $raw['OAUTH_CORPORATE_ID']  ?? '',
             'OAUTH_TOKEN_PRIVATE'  => $tokenPrivate,
+            // KodeSertifikat — kode sertifikat terdaftar di tabel `sertifikat` auth2_access.
+            // Berbeda dari auth_client_id (OAuth2 SSO).
+            // Di env file: auth_sertifikat atau OAUTH_SERTIFIKAT
+            'OAUTH_SERTIFIKAT'     => $raw['auth_sertifikat']    ?? $raw['OAUTH_SERTIFIKAT']    ?? '',
             '_env_file'            => $path,
             '_source'              => 'assist-bpr.net/env',
         ];
@@ -460,7 +474,9 @@ $_oauthClientId     = $_ASSIST_ENV['OAUTH_CLIENT_ID']     ?? '';
 $_oauthClientSecret = $_ASSIST_ENV['OAUTH_CLIENT_SECRET'] ?? '';
 $_oauthUsername     = $_ASSIST_ENV['OAUTH_USERNAME']      ?? '';
 $_oauthPassword     = $_ASSIST_ENV['OAUTH_PASSWORD']      ?? '';
-$_de061             = $_ASSIST_ENV['DE061_SIM_SERIAL']     ?? '';
+$_de061              = $_ASSIST_ENV['DE061_SIM_SERIAL']     ?? '';
+$_oauthSertifikat   = $_ASSIST_ENV['OAUTH_SERTIFIKAT']    ?? '';  // KodeSertifikat di tabel sertifikat
+$_oauthKodeAplikasi = $_ASSIST_ENV['OAUTH_KODE_APLIKASI'] ?? '';
 $_oauthCorporateId  = '';           // auth_corporate_id dari env BPR
 $_oauthTokenPrivate = '';           // RSA private key dari bpr.myassist.id.env
 $_oauthSource       = !empty($_oauthClientId) ? '.assist.env' : '';
@@ -486,6 +502,10 @@ if (empty($_oauthClientId) && !empty($_BPR_ENV['OAUTH_CLIENT_ID'])) {
 // Corporate ID + RSA key selalu diisi dari BPR env jika belum ada (field tambahan)
 if (empty($_oauthCorporateId)  && !empty($_BPR_ENV['OAUTH_CORPORATE_ID']))  $_oauthCorporateId  = $_BPR_ENV['OAUTH_CORPORATE_ID'];
 if (empty($_oauthTokenPrivate) && !empty($_BPR_ENV['OAUTH_TOKEN_PRIVATE'])) $_oauthTokenPrivate = $_BPR_ENV['OAUTH_TOKEN_PRIVATE'];
+// OAUTH_SERTIFIKAT — KodeSertifikat untuk assist-switching token system
+// .assist.env lebih prioritas; fallback ke assist-bpr.net/env jika ada field auth_sertifikat
+if (empty($_oauthSertifikat)    && !empty($_BPR_ENV['OAUTH_SERTIFIKAT']))    $_oauthSertifikat   = $_BPR_ENV['OAUTH_SERTIFIKAT'];
+if (empty($_oauthKodeAplikasi) && !empty($_BPR_ENV['OAUTH_KODE_APLIKASI'])) $_oauthKodeAplikasi = $_BPR_ENV['OAUTH_KODE_APLIKASI'];
 
 $_envFile = !empty($_oauthSource) && str_contains($_oauthSource, 'bpr')
     ? ($_BPR_ENV['_env_file'] ?? ($_ASSIST_ENV['_env_file'] ?? ''))
@@ -495,6 +515,9 @@ $_DETECTION_LOG['assist_bpr_root']      = !empty($_ASSIST_BPR_ROOT)     ? '✅ '
 $_DETECTION_LOG['oauth_env_file']       = !empty($_envFile)             ? '✅ ' . $_envFile               : '⚠️ env tidak ditemukan';
 $_DETECTION_LOG['oauth_source']         = !empty($_oauthSource)         ? '✅ ' . $_oauthSource           : '❌ tidak ada sumber OAuth';
 $_DETECTION_LOG['oauth_client_id']      = !empty($_oauthClientId)       ? '✅ terisi (' . $_oauthSource . ')' : '❌ belum diisi';
+$_DETECTION_LOG['oauth_sertifikat']     = !empty($_oauthSertifikat)
+    ? '✅ terisi — AKAN DIPAKAI sebagai KodeSertifikat'
+    : '❌ KOSONG — fallback ke OAUTH_CLIENT_ID (kemungkinan salah!)';
 $_DETECTION_LOG['oauth_username']       = !empty($_oauthUsername)       ? '✅ terisi (' . $_oauthSource . ')' : '❌ belum diisi';
 $_DETECTION_LOG['oauth_corporate_id']   = !empty($_oauthCorporateId)    ? '✅ ' . $_oauthCorporateId      : '⚠️ kosong (opsional)';
 $_DETECTION_LOG['oauth_token_private']  = !empty($_oauthTokenPrivate)   ? '✅ RSA key terdeteksi'         : '⚠️ tidak ada (opsional)';
@@ -519,6 +542,13 @@ define('OAUTH_PASSWORD',       $_oauthPassword);
 define('OAUTH_CORPORATE_ID',   $_oauthCorporateId);
 define('OAUTH_TOKEN_PRIVATE',  $_oauthTokenPrivate);
 define('DE061_SIM_SERIAL',     $_de061);
+// OAUTH_SERTIFIKAT = KodeSertifikat terdaftar di tabel `sertifikat` di DB auth2_access.
+// BERBEDA dari OAUTH_CLIENT_ID (yang adalah auth_client_id = kode BPR untuk OAuth2 SSO).
+// Diperoleh dari admin SIS, disimpan di .assist.env sebagai OAUTH_SERTIFIKAT=xxxx
+// Jika kosong, getAccessToken() fallback ke OAUTH_CLIENT_ID (backward compat).
+define('OAUTH_SERTIFIKAT',     $_oauthSertifikat);
+// OAUTH_KODE_APLIKASI = KodeAplikasi di tabel accesstoken (mis: MRA000175)
+define('OAUTH_KODE_APLIKASI',  $_oauthKodeAplikasi);
 
 // ── Token Cache (CDS pattern) ────────────────────────────────
 // Cache dir: ikuti struktur asli jika assist root ditemukan, fallback ke __DIR__
@@ -544,7 +574,7 @@ unset($_myAssistBase, $_urlGetToken, $_urlCekToken, $_urlRfzToken,
       $_urlDigital, $_urlDigitalSS, $_cicd, $_mftfi, $_mftfiFromCache,
       $_kodeAgen, $_rawKode, $_cacheDir, $_envFile, $_oauthSource,
       $_oauthClientId, $_oauthClientSecret, $_oauthUsername, $_oauthPassword,
-      $_oauthCorporateId, $_oauthTokenPrivate, $_de061, $_RAW_KODE_TF);
+      $_oauthCorporateId, $_oauthTokenPrivate, $_oauthSertifikat, $_oauthKodeAplikasi, $_de061, $_RAW_KODE_TF);
 
 // ============================================================
 // FUNGSI HELPER
@@ -647,9 +677,12 @@ function sendHttpPost(string $url, string $body, array $headers, bool $isJson = 
  *                     http://db.auth.access.sis1.net/auth2_access/public/getaccesstoken
  *
  *  auth2_access mensyaratkan:
- *    Header : Authorization: Bearer {KodeSertifikat}   ← OAUTH_CLIENT_ID
+ *    Header : Authorization: Bearer {KodeSertifikat}   ← OAUTH_SERTIFIKAT
  *    POST   : PLATFORM=xxx&DEVICEID=xxx&VERSIAPLIKASI=xxx
  *    (BUKAN format OAuth2 standard grant_type/client_id/etc)
+ *
+ *  KodeSertifikat = nilai dari konstanta OAUTH_SERTIFIKAT (dari .assist.env).
+ *  BUKAN OAUTH_CLIENT_ID (auth_client_id) yang merupakan kode BPR untuk OAuth2 SSO.
  *
  *  Response sukses (auth2_access):
  *    {"Status":1, "Data":{"AccessToken":"...","RefreshToken":"...","LifeTime":"10", ...}}
@@ -662,25 +695,46 @@ function getAccessToken(): array {
     }
 
     // 2. Bangun POST body sesuai format Assist (bukan OAuth2 standard)
-    //    DEVICEID  = DE061_SIM_SERIAL jika ada, fallback KODE_AGEN, fallback md5 hostname
-    $deviceId = DE061_SIM_SERIAL ?: (KODE_AGEN ?: md5(gethostname()));
-    $body = http_build_query([
-        'PLATFORM'       => 'ANDROID',
-        'DEVICEID'       => $deviceId,
-        'VERSIAPLIKASI'  => '1.0.0',
-        'USERNAME'       => OAUTH_USERNAME,
-    ]);
+    //    DEVICEID  = DE061_SIM_SERIAL (IP server) jika ada, fallback SERVER_ADDR, fallback KODE_AGEN, fallback md5 hostname
+    //    Dari tabel accesstoken: DeviceID='10.0.5.52', Platform='WEB', VersiAplikasi='1.0.17'
+    $deviceId = DE061_SIM_SERIAL
+        ?: ($_SERVER['SERVER_ADDR'] ?? '')
+        ?: (KODE_AGEN ?: md5(gethostname()));
+    $postBody = [
+        'PLATFORM'      => 'WEB',
+        'DEVICEID'      => $deviceId,
+        'VERSIAPLIKASI' => '1.0.17',
+        'USERNAME'      => OAUTH_USERNAME,
+    ];
+    // Sertakan KODEAPLIKASI jika tersedia (dari tabel accesstoken: KodeAplikasi='MRA000175')
+    if (OAUTH_KODE_APLIKASI !== '') {
+        $postBody['KODEAPLIKASI'] = OAUTH_KODE_APLIKASI;
+    }
+    $body = http_build_query($postBody);
 
     // 3. Header: Authorization: Bearer {KodeSertifikat}
     //    assist-auth_api membaca header ini dan meneruskannya ke auth2_access.
-    //    OAUTH_CLIENT_ID = auth_client_id = KodeSertifikat yang terdaftar di DB.
+    //
+    //    PRIORITAS pengambilan KodeSertifikat:
+    //      1. OAUTH_SERTIFIKAT  ← isian baru di .assist.env (auth_sertifikat dari admin SIS)
+    //      2. OAUTH_CLIENT_ID   ← fallback lama (biasanya salah, tapi dijaga backward compat)
+    //
+    //    OAUTH_SERTIFIKAT ≠ OAUTH_CLIENT_ID:
+    //      OAUTH_CLIENT_ID  = auth_client_id BPR = kode untuk OAuth2 SSO di myassist.id
+    //      OAUTH_SERTIFIKAT = KodeSertifikat di tabel `sertifikat` auth2_access = untuk assist-switching
+    $kodeSertifikat = OAUTH_SERTIFIKAT ?: OAUTH_CLIENT_ID;
+    $sertifikatSource = OAUTH_SERTIFIKAT ? 'OAUTH_SERTIFIKAT' : 'OAUTH_CLIENT_ID (fallback)';
+
     $headers = [
         'Content-Type: application/x-www-form-urlencoded',
         'Accept: application/json',
-        'Authorization: Bearer ' . OAUTH_CLIENT_ID,
+        'Authorization: Bearer ' . $kodeSertifikat,
     ];
 
     $result = sendHttpPost(URL_GET_TOKEN, $body, $headers);
+    // Sertakan info sumber KodeSertifikat di result untuk debug
+    $result['kode_sertifikat']        = $kodeSertifikat;
+    $result['kode_sertifikat_source'] = $sertifikatSource;
 
     if (!empty($result['curl_error'])) {
         return ['success' => false, 'error' => 'cURL: ' . $result['curl_error'], 'raw' => $result];
@@ -696,13 +750,21 @@ function getAccessToken(): array {
                 ?? '';
 
     if (!empty($accessToken)) {
+        // Simpan KodeSertifikat di cache untuk referensi
         // Normalisasi ke format cache: simpan sebagai access_token
         $cacheData = [
             'access_token' => $accessToken,
             'expires_in'   => (int)(($data['Data']['LifeTime'] ?? 10) * 60),
         ];
         saveTokenCache($cacheData);
-        return ['success' => true, 'token' => $accessToken, 'from_cache' => false, 'raw' => $result];
+        return [
+            'success'          => true,
+            'token'            => $accessToken,
+            'from_cache'       => false,
+            'raw'              => $result,
+            'sertifikat_used'  => $kodeSertifikat,
+            'sertifikat_source'=> $sertifikatSource,
+        ];
     }
 
     // Susun pesan error informatif
@@ -713,7 +775,13 @@ function getAccessToken(): array {
            ?? $data['error']
            ?? (trim($result['raw']) ?: null)
            ?? ('HTTP ' . $result['http_code']);
-    return ['success' => false, 'error' => $errMsg, 'raw' => $result];
+    return [
+        'success'          => false,
+        'error'            => $errMsg,
+        'raw'              => $result,
+        'sertifikat_used'  => $kodeSertifikat,
+        'sertifikat_source'=> $sertifikatSource,
+    ];
 }
 
 /**
@@ -1346,6 +1414,7 @@ $isConfigured = (KODE_AGEN !== '' && OAUTH_CLIENT_ID !== '' && OAUTH_USERNAME !=
         }
         .debug-content.show { display: block; }
         .dc { color: #38bdf8; }
+        .de { color: #fbbf24; }   /* debug warning/error = amber */
 
         /* ── Spinner ── */
         .spinner {
@@ -1523,7 +1592,9 @@ $isConfigured = (KODE_AGEN !== '' && OAUTH_CLIENT_ID !== '' && OAUTH_USERNAME !=
 
         <?php
         // ── Blok 3: OAuth Credentials ────────────────────────────────
-        $panelCls3 = ($oauthIdOk && $oauthSecOk && $oauthUserOk) ? 'ready' : ($oauthIdOk || $oauthUserOk ? 'warn' : 'error');
+        $sertOk    = OAUTH_SERTIFIKAT !== '';
+        $panelCls3 = ($oauthIdOk && $oauthSecOk && $oauthUserOk && $sertOk) ? 'ready'
+                   : ($oauthIdOk || $oauthUserOk ? 'warn' : 'error');
         $srcLabel  = '';
         if (!empty($_BPR_ENV['_env_file']))        $srcLabel = 'bpr-env: ' . basename($_BPR_ENV['_env_file']);
         elseif (!empty($_ASSIST_ENV['_env_file'])) $srcLabel = '.assist.env';
@@ -1539,12 +1610,32 @@ $isConfigured = (KODE_AGEN !== '' && OAUTH_CLIENT_ID !== '' && OAUTH_USERNAME !=
             <div class="det-rows">
                 <?php $row(
                     $oauthIdOk ? '✅' : '❌',
-                    'OAUTH_CLIENT_ID',
-                    $oauthIdOk ? OAUTH_CLIENT_ID : 'Belum diisi',
+                    'OAUTH_CLIENT_ID (SSO)',
+                    $oauthIdOk ? OAUTH_CLIENT_ID . ' (kode BPR — untuk OAuth2 SSO saja)' : 'Belum diisi',
                     $oauthIdOk ? 'ok' : 'err',
                     $oauthIdOk ? 'OK' : 'MISSING',
                     $oauthIdOk ? 'ok' : 'err'
                 ); ?>
+                <?php
+                // ── OAUTH_SERTIFIKAT — field paling kritis untuk assist-switching ──
+                $sertDisplay = OAUTH_SERTIFIKAT ?: '⚠️ KOSONG → fallback ke OAUTH_CLIENT_ID (kemungkinan SALAH!)';
+                $row(
+                    $sertOk ? '✅' : '⚠️',
+                    'OAUTH_SERTIFIKAT ★',
+                    $sertDisplay,
+                    $sertOk ? 'ok' : 'warn',
+                    $sertOk ? 'DIPAKAI' : 'BUTUH ISI',
+                    $sertOk ? 'ok' : 'err'
+                );
+                if (!$sertOk): ?>
+                <div style="grid-column:1/-1;background:#451a03;border:1px solid #f59e0b;border-radius:6px;padding:8px 12px;font-size:.78rem;color:#fde68a;line-height:1.6;">
+                    ★ <strong>OAUTH_SERTIFIKAT belum diisi!</strong> Ini adalah <em>KodeSertifikat</em> yang
+                    terdaftar di tabel <code>sertifikat</code> di DB <code>db.auth.access.sis1.net</code>.
+                    Nilainya berbeda dari <code>auth_client_id</code>. Minta ke admin SIS, lalu tambahkan
+                    ke file <code>.assist.env</code> (production):<br>
+                    <code>OAUTH_SERTIFIKAT=nilai_dari_admin_SIS</code>
+                </div>
+                <?php endif; ?>
                 <?php $row(
                     $oauthSecOk ? '✅' : '❌',
                     'OAUTH_CLIENT_SECRET',
@@ -1836,13 +1927,25 @@ DE061_SIM_SERIAL=</pre>
 <span class="dc">━━ STEP 1: GET TOKEN ━━</span>
 Token URL  : <?= htmlspecialchars(URL_GET_TOKEN) ?>
 
-Client ID  : <?= htmlspecialchars(OAUTH_CLIENT_ID ?: '(kosong)') ?>
+<?php
+// ── Tampilkan info KodeSertifikat yang dipakai ───────────────
+$_sertUsed   = $result['debug']['step1_get_token']['sertifikat_used']   ?? (OAUTH_SERTIFIKAT ?: OAUTH_CLIENT_ID);
+$_sertSrc    = $result['debug']['step1_get_token']['sertifikat_source'] ?? (OAUTH_SERTIFIKAT ? 'OAUTH_SERTIFIKAT' : 'OAUTH_CLIENT_ID (fallback)');
+$_sertOk     = (OAUTH_SERTIFIKAT !== '');
+?>
+<span class="<?= $_sertOk ? 'dc' : 'de' ?>">KodeSert  : <?= htmlspecialchars($_sertUsed ?: '(kosong!)') ?> ← <?= htmlspecialchars($_sertSrc) ?></span>
+<?php if (!$_sertOk): ?>
+<span class="de">⚠️  OAUTH_SERTIFIKAT kosong! Fallback ke OAUTH_CLIENT_ID.</span>
+<span class="de">   Jika "Aplikasi tidak valid" → isi OAUTH_SERTIFIKAT=xxxx di .assist.env</span>
+<span class="de">   (tanyakan KodeSertifikat ke admin SIS — bukan sama dengan auth_client_id)</span>
+<?php endif; ?>
+Client ID  : <?= htmlspecialchars(OAUTH_CLIENT_ID ?: '(kosong)') ?> (untuk OAuth2 SSO — bukan KodeSertifikat)
 Username   : <?= htmlspecialchars(OAUTH_USERNAME  ?: '(kosong)') ?>
 Kode Agen  : <?= htmlspecialchars(KODE_AGEN       ?: '(kosong)') ?>
 Device ID  : <?= htmlspecialchars(DE061_SIM_SERIAL ?: (KODE_AGEN ?: md5(gethostname()))) ?>
 
 Body Sent  : <?= htmlspecialchars($result['debug']['step1_get_token']['raw']['body_sent'] ?? '-') ?>
-Hdr Auth   : Authorization: Bearer <?= htmlspecialchars(OAUTH_CLIENT_ID ?: '(kosong)') ?>
+Hdr Auth   : Authorization: Bearer <?= htmlspecialchars($_sertUsed ?: '(kosong)') ?>
 
 Cache File : <?= htmlspecialchars(CACHE_FILE_TF) ?>
 Dari Cache : <?= ($result['debug']['step1_get_token']['from_cache'] ?? false) ? 'YA' : 'TIDAK' ?>

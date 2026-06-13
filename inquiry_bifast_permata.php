@@ -673,7 +673,7 @@ function getAccessToken(): array {
     $postBody = [
         'PLATFORM'      => 'android',
         'DEVICEID'      => $deviceId,
-        'VERSIAPLIKASI' => '2.9.0',
+        'VERSIAPLIKASI' => '1.2.6',
         'USERNAME'      => OAUTH_USERNAME,
     ];
     // Sertakan KODEAPLIKASI jika tersedia (dari tabel accesstoken: KodeAplikasi='MRA000301')
@@ -847,16 +847,28 @@ function buildISO8583RequestBIFAST(array $params): array {
  * Kirim request ISO 8583 ke assist-switching_v3_pro (/mobile-digital)
  *
  * Sesuai source code (mbanking.controller.php):
- *   $_POST['cCode'] = JSON ISO request
- *   Header: Authorization: Bearer {accessToken}  ← di-forward ke digital.sis1.net
+ *   SendHTTPPost($cURL, $_POST, "", false, $vaHeaders, true)
+ *   → proxy forward $_POST as-is ke digital.sis1.net
+ *   → proxy memvalidasi DEVICEID sebelum forward (401 jika kosong)
  *
- * CATATAN: header authorization(SHA256), identity(cicd), datetime adalah header
- *   INTERNAL antara switching_v3_pro ↔ digital.sis1.net — TIDAK perlu dikirim dari sini.
- *   Proxy mbanking.controller.php meneruskan Authorization Bearer kita saja.
+ * POST body wajib mengandung:
+ *   cCode      = JSON ISO 8583 request
+ *   DEVICEID   = DE061_SIM_SERIAL (divalidasi proxy sebelum forward)
+ *   PLATFORM   = android
+ *   VERSIAPLIKASI = sesuai row accesstoken
  */
 function sendBIFASTInquiryRequest(array $isoRequest, string $accessToken): array {
-    $cB = json_encode($isoRequest, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
-    $cM = 'cCode=' . $cB;
+    $cB      = json_encode($isoRequest, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    $deviceId = DE061_SIM_SERIAL
+        ?: ($_SERVER['SERVER_ADDR'] ?? '')
+        ?: (KODE_AGEN ?: md5(gethostname()));
+
+    $postFields = http_build_query([
+        'cCode'         => $cB,
+        'DEVICEID'      => $deviceId,
+        'PLATFORM'      => 'android',
+        'VERSIAPLIKASI' => '1.2.6',
+    ]);
     $cU = URL_DIGITAL;
 
     $headers = [
@@ -864,9 +876,9 @@ function sendBIFASTInquiryRequest(array $isoRequest, string $accessToken): array
         'Content-Type: application/x-www-form-urlencoded',
     ];
 
-    $result = sendHttpPost($cU, $cM, $headers);
+    $result = sendHttpPost($cU, $postFields, $headers);
     $result['iso_request'] = $isoRequest;
-    $result['body_signed'] = $cM;
+    $result['body_signed'] = $postFields;
 
     return $result;
 }

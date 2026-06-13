@@ -2,9 +2,11 @@
 /*
 /.*
 
-# Keep only these 4 files
+# Keep only these files
 !inquiry_transfer_permata.php
 !inquiry_bifast_permata.php
-!.assist.env
+!router.php
+!ecosystem-php.config.cjs
+!.assist.env.example
 !README.md
 !.gitignore

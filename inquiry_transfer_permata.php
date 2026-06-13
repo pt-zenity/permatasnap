@@ -11,7 +11,7 @@
  *   - RTGS    (Real-Time Gross Settlement)
  *
  * AUTO-DETECTION dari source code assist-switching_v3_pro & assist-bpr.net:
- *   ✅ URL_GET_TOKEN, URL_DIGITAL, CICD, MFTFI → dari config/local_config.php
+ *   ✅ URL_GET_TOKEN, URL_DIGITAL, MFTFI → dari config/local_config.php
  *   ✅ KODE_AGEN, MFTFI TF  → dari nama file storage/cds/cache/*snap_tf_bank_permata.cache
  *   ✅ DE061_SIM_SERIAL     → dari storage/cds/cache/ (nama file cache terakhir)
  *   ✅ OAuth credentials (auto-detect, urutan prioritas):
@@ -31,8 +31,8 @@
  * Alur transaksi (sesuai source code mbanking.controller.php):
  *   1. Ambil OAuth access token dari myassist.sis1.net
  *   2. Bangun pesan ISO 8583-like JSON (MTI="010", MSG dengan DE fields)
- *   3. Kirim POST ke digital.sis1.net/assist-digital.net/public/dgl
- *      dengan header: authorization (SHA256), identity (cicd), datetime
+ *   3. Kirim POST ke switching.mcoll.sis1.net/.../mobile-digital (proxy v3)
+ *      dengan header: Authorization: Bearer {accessToken}
  *   4. Response di-parse dari ISO 8583 array
  *
  * Referensi: assist-switching_v3_pro v1.6.39 "Assist Pro Net"
@@ -450,16 +450,15 @@ $_myAssistBase  = $_LOCAL_CONFIG['_URL_MY_ASSIST_'] ?? 'http://myassist.sis1.net
 $_urlGetToken   = $_LOCAL_CONFIG['_URL_GET_TOKEN_'] ?? ($_myAssistBase . '/oauth/getaccesstoken');
 $_urlCekToken   = $_LOCAL_CONFIG['_URL_CEK_TOKEN_'] ?? ($_myAssistBase . '/oauth/cekaccesstoken');
 $_urlRfzToken   = $_LOCAL_CONFIG['_URL_RFZ_TOKEN_'] ?? ($_myAssistBase . '/oauth/getaccesstokenfromrefresh');
-$_urlDigital    = $_LOCAL_CONFIG['s']               ?? 'http://digital.sis1.net/assist-digital.net/public/dgl';
-$_urlDigitalSS  = $_LOCAL_CONFIG['ss']              ?? 'http://digital.sis1.net/assist-digital.net/public/rgol';
-$_cicd          = $_LOCAL_CONFIG['cicd']            ?? 'db96e3cba196f76a6c31e4c9625614b3dc57619fba7e29ee534dd20c5c44855d';
+$_swProBase     = $_LOCAL_CONFIG['_URL_SW_PRO_']    ?? 'http://switching.mcoll.sis1.net/assist-switching_v3_pro/public';
+$_urlDigital    = $_LOCAL_CONFIG['s']               ?? ($_swProBase . '/mobile-digital');
+$_urlDigitalSS  = $_LOCAL_CONFIG['ss']              ?? ($_swProBase . '/mobile-digital');
 $_mftfi         = $_CACHE_TF['mftfi']               ?? ($_LOCAL_CONFIG['mftfi'] ?? '002');
 
 $_DETECTION_LOG['assist_root']    = $_ASSIST_ROOT ?: '— tidak ditemukan (fallback ke default)';
 $_DETECTION_LOG['local_config']   = !empty($_LOCAL_CONFIG) ? '✅ Terbaca (' . count($_LOCAL_CONFIG) . ' keys)' : '⚠️ Tidak ditemukan';
 $_DETECTION_LOG['url_get_token']  = empty($_LOCAL_CONFIG['_URL_GET_TOKEN_']) ? '⚠️ fallback default' : '✅ dari local_config.php';
-$_DETECTION_LOG['url_digital']    = empty($_LOCAL_CONFIG['s'])               ? '⚠️ fallback default' : '✅ dari local_config.php';
-$_DETECTION_LOG['cicd']           = empty($_LOCAL_CONFIG['cicd'])            ? '⚠️ fallback default' : '✅ dari local_config.php';
+$_DETECTION_LOG['url_digital']    = empty($_LOCAL_CONFIG['s'])               ? '⚠️ fallback default (switching.mcoll.sis1.net)' : '✅ dari local_config.php';
 
 // ── KODE_AGEN + MFTFI (dari cache file) ──────────────────────
 $_kodeAgen     = $_CACHE_TF['kode_agen'] ?? '';
@@ -538,7 +537,6 @@ define('URL_CEK_TOKEN',  $_urlCekToken);
 define('URL_RFZ_TOKEN',  $_urlRfzToken);
 define('URL_DIGITAL',    $_urlDigital);
 define('URL_DIGITAL_SS', $_urlDigitalSS);
-define('CICD',           $_cicd);
 define('MFTFI',          $_mftfi);
 define('KODE_AGEN',      $_kodeAgen);
 define('OAUTH_CLIENT_ID',      $_oauthClientId);
@@ -577,7 +575,7 @@ define('DEBUG_MODE',   true);
 //          $_ASSIST_BPR_ROOT, dan $_BPR_ENV TIDAK di-unset —
 //          masih dipakai oleh panel Status Auto-Detection di HTML bawah.
 unset($_myAssistBase, $_urlGetToken, $_urlCekToken, $_urlRfzToken,
-      $_urlDigital, $_urlDigitalSS, $_cicd, $_mftfi, $_mftfiFromCache,
+      $_urlDigital, $_urlDigitalSS, $_mftfi, $_mftfiFromCache,
       $_kodeAgen, $_rawKode, $_cacheDir, $_envFile, $_oauthSource,
       $_oauthClientId, $_oauthClientSecret, $_oauthUsername, $_oauthPassword,
       $_oauthCorporateId, $_oauthTokenPrivate, $_oauthSertifikat, $_oauthKodeAplikasi, $_de061, $_RAW_KODE_TF);
@@ -893,45 +891,29 @@ function buildISO8583Request(array $params, string $accessToken): array {
 }
 
 /**
- * Kirim request inquiry ke digital.sis1.net
+ * Kirim request inquiry ke assist-switching_v3_pro (/mobile-digital)
  *
  * Sesuai source code (mbanking.controller.php):
- *   $cM  = "cCode=" . $cB;  ← body form-urlencoded
- *   $cU  = GetConfig('s')   ← URL digital server
- *   $vaH = array(
- *     'authorization: ' . hash('sha256', $cM . SNow()),
- *     'identity: '      . GetConfig('cicd'),
- *     'datetime: '      . SNow(),
- *     'Content-Type: application/x-www-form-urlencoded'
- *   );
- *   SendHTTPPostMB($cU, $cM, '', false, $vaH);
+ *   $_POST['cCode'] = JSON ISO request
+ *   Header: Authorization: Bearer {accessToken}  ← di-forward ke digital.sis1.net
  *
- * PENTING: authorization = SHA256(fullBodyString . timestamp)
- *          bukan SHA256(json . timestamp) — melainkan SHA256("cCode={json}" . timestamp)
+ * CATATAN: header authorization(SHA256), identity(cicd), datetime adalah header
+ *   INTERNAL antara switching_v3_pro ↔ digital.sis1.net — TIDAK perlu dikirim dari sini.
+ *   Proxy mbanking.controller.php meneruskan Authorization Bearer kita saja.
  */
 function sendInquiryRequest(array $isoRequest, string $accessToken): array {
-    $cB  = json_encode($isoRequest, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
-    $cM  = 'cCode=' . $cB;
-    $cU  = URL_DIGITAL;
-    $dNs = SNow();
-
-    // Authorization = SHA256(body_string . timestamp)
-    $authorization = hash('sha256', $cM . $dNs);
+    $cB = json_encode($isoRequest, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    $cM = 'cCode=' . $cB;
+    $cU = URL_DIGITAL;
 
     $headers = [
-        'authorization: ' . $authorization,
-        'identity: '      . CICD,
-        'datetime: '      . $dNs,
-        'Content-Type: application/x-www-form-urlencoded',
-        // Tambah Authorization Bearer sesuai OAuth token
         'Authorization: Bearer ' . $accessToken,
+        'Content-Type: application/x-www-form-urlencoded',
     ];
 
     $result = sendHttpPost($cU, $cM, $headers);
     $result['iso_request'] = $isoRequest;
     $result['body_signed'] = $cM;
-    $result['datetime']    = $dNs;
-    $result['sha256_auth'] = $authorization;
 
     return $result;
 }
@@ -1477,7 +1459,6 @@ $isConfigured = (KODE_AGEN !== '' && OAUTH_CLIENT_ID !== '' && OAUTH_USERNAME !=
         $localCfgOk    = !empty($_LOCAL_CONFIG);
         $urlTokenOk    = !empty($_LOCAL_CONFIG['_URL_GET_TOKEN_']);
         $urlDigitalOk  = !empty($_LOCAL_CONFIG['s']);
-        $cicdOk        = !empty($_LOCAL_CONFIG['cicd']);
         $kodeAgenOk    = KODE_AGEN !== '';
         $mftfiOk       = !empty($_CACHE_TF['mftfi'] ?? null);
         $cacheFileOk   = file_exists(CACHE_FILE_TF);
@@ -1705,12 +1686,7 @@ $isConfigured = (KODE_AGEN !== '' && OAUTH_CLIENT_ID !== '' && OAUTH_USERNAME !=
                     URL_DIGITAL,
                     'ok', $urlDigitalOk ? 'CONFIG' : 'DEFAULT', $urlDigitalOk ? 'ok' : 'info'
                 ); ?>
-                <?php $row(
-                    $cicdOk ? '✅' : '⚠️',
-                    'CICD Identity',
-                    substr(CICD, 0, 20) . '…',
-                    'ok', $cicdOk ? 'CONFIG' : 'DEFAULT', $cicdOk ? 'ok' : 'info'
-                ); ?>
+
             </div>
         </div>
 
@@ -1753,8 +1729,8 @@ DE061_SIM_SERIAL=</pre>
             <div class="alert alert-info" style="margin-bottom:16px;">
                 <span class="al-ic">ℹ️</span>
                 <div>
-                    Request dikirim ke <strong>digital.sis1.net</strong> menggunakan format ISO 8583 (MTI=010).
-                    Header: <code>authorization=SHA256(body+timestamp)</code>, <code>identity=cicd</code>.
+                    Request dikirim ke <strong>proxy assist-switching_v3_pro</strong> (<code>/mobile-digital</code>) menggunakan format ISO 8583 (MTI=010).
+                    Header: <code>Authorization: Bearer {token}</code> — proxy yang meneruskan ke digital.sis1.net.
                     DE048 berisi kode transaksi Assist (<code>INQTFDANA</code> / <code>INQLLG</code> / <code>INQRTGS</code>).
                 </div>
             </div>
@@ -1970,10 +1946,6 @@ OAuth Raw  : <?= htmlspecialchars($result['debug']['step1_get_token']['raw']['ra
 URL        : <?= htmlspecialchars($result['debug']['step3_http_result']['url'] ?? '') ?>
 
 Body Sent  : <?= htmlspecialchars($result['debug']['step3_http_result']['body_signed'] ?? '') ?>
-
-DateTime   : <?= htmlspecialchars($result['debug']['step3_http_result']['datetime'] ?? '') ?>
-
-SHA256 Auth: <?= htmlspecialchars($result['debug']['step3_http_result']['sha256_auth'] ?? '') ?>
 
 HTTP Code  : <?= htmlspecialchars((string)($result['debug']['step3_http_result']['http_code'] ?? '')) ?>  (<?= $result['debug']['step3_http_result']['elapsed_ms'] ?? 0 ?>ms)
 

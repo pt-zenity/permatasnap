@@ -506,6 +506,12 @@ if (empty($_oauthTokenPrivate) && !empty($_BPR_ENV['OAUTH_TOKEN_PRIVATE'])) $_oa
 // .assist.env lebih prioritas; fallback ke assist-bpr.net/env jika ada field auth_sertifikat
 if (empty($_oauthSertifikat)    && !empty($_BPR_ENV['OAUTH_SERTIFIKAT']))    $_oauthSertifikat   = $_BPR_ENV['OAUTH_SERTIFIKAT'];
 if (empty($_oauthKodeAplikasi) && !empty($_BPR_ENV['OAUTH_KODE_APLIKASI'])) $_oauthKodeAplikasi = $_BPR_ENV['OAUTH_KODE_APLIKASI'];
+if (empty($_de061)             && !empty($_BPR_ENV['DE061_SIM_SERIAL']))     $_de061             = $_BPR_ENV['DE061_SIM_SERIAL'];
+// Sumber 3: hardcoded defaults dari tabel accesstoken row MRA000301/android
+// Digunakan jika .assist.env tidak ada DAN assist-bpr.net/env tidak mengandung nilai ini
+if (empty($_oauthSertifikat))   $_oauthSertifikat   = '05038c991666fc57a0d6f4ebe0b92cdf';
+if (empty($_oauthKodeAplikasi)) $_oauthKodeAplikasi = 'MRA000301';
+if (empty($_de061))             $_de061             = '0069d858961c8ef36a20';
 
 $_envFile = !empty($_oauthSource) && str_contains($_oauthSource, 'bpr')
     ? ($_BPR_ENV['_env_file'] ?? ($_ASSIST_ENV['_env_file'] ?? ''))
@@ -513,7 +519,7 @@ $_envFile = !empty($_oauthSource) && str_contains($_oauthSource, 'bpr')
 
 $_DETECTION_LOG['assist_bpr_root']      = !empty($_ASSIST_BPR_ROOT)     ? '✅ ' . $_ASSIST_BPR_ROOT      : '— tidak ditemukan';
 $_DETECTION_LOG['oauth_env_file']       = !empty($_envFile)             ? '✅ ' . $_envFile               : '⚠️ env tidak ditemukan';
-$_DETECTION_LOG['oauth_source']         = !empty($_oauthSource)         ? '✅ ' . $_oauthSource           : '❌ tidak ada sumber OAuth';
+$_DETECTION_LOG['oauth_source']         = !empty($_oauthSource)         ? '✅ ' . $_oauthSource           : '⚠️ tidak ada .assist.env (pakai hardcoded MRA000301)';
 $_DETECTION_LOG['oauth_client_id']      = !empty($_oauthClientId)       ? '✅ terisi (' . $_oauthSource . ')' : '❌ belum diisi';
 $_DETECTION_LOG['oauth_sertifikat']     = !empty($_oauthSertifikat)
     ? '✅ terisi — AKAN DIPAKAI sebagai KodeSertifikat'
@@ -521,7 +527,7 @@ $_DETECTION_LOG['oauth_sertifikat']     = !empty($_oauthSertifikat)
 $_DETECTION_LOG['oauth_username']       = !empty($_oauthUsername)       ? '✅ terisi (' . $_oauthSource . ')' : '❌ belum diisi';
 $_DETECTION_LOG['oauth_corporate_id']   = !empty($_oauthCorporateId)    ? '✅ ' . $_oauthCorporateId      : '⚠️ kosong (opsional)';
 $_DETECTION_LOG['oauth_token_private']  = !empty($_oauthTokenPrivate)   ? '✅ RSA key terdeteksi'         : '⚠️ tidak ada (opsional)';
-$_DETECTION_LOG['de061_sim_serial']     = !empty($_de061)               ? '✅ terisi dari .assist.env'    : '⚠️ kosong';
+$_DETECTION_LOG['de061_sim_serial']     = !empty($_de061)               ? '✅ ' . $_de061                 : '⚠️ kosong';
 
 // ============================================================
 // DEFINISIKAN KONSTANTA (dari hasil auto-detection)

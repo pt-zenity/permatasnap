@@ -512,7 +512,7 @@ define('DE061_SIM_SERIAL',     $_de061);
 // Diperoleh dari admin SIS, disimpan di .assist.env sebagai OAUTH_SERTIFIKAT=xxxx
 // Jika kosong, getAccessToken() fallback ke OAUTH_CLIENT_ID (backward compat).
 define('OAUTH_SERTIFIKAT',     $_oauthSertifikat);
-// OAUTH_KODE_APLIKASI = KodeAplikasi di tabel accesstoken (mis: MRA000175)
+// OAUTH_KODE_APLIKASI = KodeAplikasi di tabel accesstoken (mis: MRA000301)
 define('OAUTH_KODE_APLIKASI',  $_oauthKodeAplikasi);
 
 // ── Token Cache BIFAST (CDS pattern) ─────────────────────────
@@ -657,17 +657,17 @@ function getAccessToken(): array {
 
     // 2. Bangun POST body sesuai format Assist (bukan OAuth2 standard)
     //    DEVICEID  = DE061_SIM_SERIAL (IP server) jika ada, fallback SERVER_ADDR, fallback KODE_AGEN, fallback md5 hostname
-    //    Dari tabel accesstoken: DeviceID='10.0.5.52', Platform='WEB', VersiAplikasi='1.0.17'
+    //    Dari tabel accesstoken MRA000301: DeviceID='0069d858961c8ef36a20', Platform='android', VersiAplikasi='2.9.0'
     $deviceId = DE061_SIM_SERIAL
         ?: ($_SERVER['SERVER_ADDR'] ?? '')
         ?: (KODE_AGEN ?: md5(gethostname()));
     $postBody = [
-        'PLATFORM'      => 'WEB',
+        'PLATFORM'      => 'android',
         'DEVICEID'      => $deviceId,
-        'VERSIAPLIKASI' => '1.0.17',
+        'VERSIAPLIKASI' => '2.9.0',
         'USERNAME'      => OAUTH_USERNAME,
     ];
-    // Sertakan KODEAPLIKASI jika tersedia (dari tabel accesstoken: KodeAplikasi='MRA000175')
+    // Sertakan KODEAPLIKASI jika tersedia (dari tabel accesstoken: KodeAplikasi='MRA000301')
     if (OAUTH_KODE_APLIKASI !== '') {
         $postBody['KODEAPLIKASI'] = OAUTH_KODE_APLIKASI;
     }

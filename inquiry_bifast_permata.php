@@ -1840,16 +1840,20 @@ $isConfigured = (KODE_AGEN !== '' && OAUTH_CLIENT_ID !== '' && OAUTH_USERNAME !=
 <span class="dc">━━ STEP 1: GET TOKEN (myassist.sis1.net) ━━</span>
 Token URL  : <?= htmlspecialchars(URL_GET_TOKEN) ?>
 
-Cache File : <?= htmlspecialchars(CACHE_FILE_BIFAST) ?>
+Client ID  : <?= htmlspecialchars(OAUTH_CLIENT_ID ?: '(kosong)') ?>
+Username   : <?= htmlspecialchars(OAUTH_USERNAME  ?: '(kosong)') ?>
+Kode Agen  : <?= htmlspecialchars(KODE_AGEN       ?: '(kosong)') ?>
+Device ID  : <?= htmlspecialchars(DE061_SIM_SERIAL ?: (KODE_AGEN ?: md5(gethostname()))) ?>
 
+Body Sent  : <?= htmlspecialchars($result['debug']['step1_get_token']['raw']['body_sent'] ?? '-') ?>
+Hdr Auth   : Authorization: Bearer <?= htmlspecialchars(OAUTH_CLIENT_ID ?: '(kosong)') ?>
+
+Cache File : <?= htmlspecialchars(CACHE_FILE_BIFAST) ?>
 Dari Cache : <?= ($result['debug']['step1_get_token']['from_cache'] ?? false) ? 'YA' : 'TIDAK' ?>
 
 Sukses     : <?= ($result['debug']['step1_get_token']['success'] ?? false) ? 'YA' : 'TIDAK' ?>
-
 HTTP Code  : <?= htmlspecialchars((string)($result['debug']['step1_get_token']['raw']['http_code'] ?? '-')) ?>
-
 Error Msg  : <?= htmlspecialchars($result['debug']['step1_get_token']['error'] ?? '-') ?>
-
 OAuth Raw  : <?= htmlspecialchars($result['debug']['step1_get_token']['raw']['raw'] ?? '-') ?>
 
 

@@ -1834,17 +1834,23 @@ DE061_SIM_SERIAL=</pre>
                 </button>
                 <div class="debug-content" id="dbg1">
 <span class="dc">━━ STEP 1: GET TOKEN ━━</span>
-Token URL : <?= htmlspecialchars(URL_GET_TOKEN) ?>
+Token URL  : <?= htmlspecialchars(URL_GET_TOKEN) ?>
 
-Dari Cache: <?= ($result['debug']['step1_get_token']['from_cache'] ?? false) ? 'YA' : 'TIDAK' ?>
+Client ID  : <?= htmlspecialchars(OAUTH_CLIENT_ID ?: '(kosong)') ?>
+Username   : <?= htmlspecialchars(OAUTH_USERNAME  ?: '(kosong)') ?>
+Kode Agen  : <?= htmlspecialchars(KODE_AGEN       ?: '(kosong)') ?>
+Device ID  : <?= htmlspecialchars(DE061_SIM_SERIAL ?: (KODE_AGEN ?: md5(gethostname()))) ?>
 
-Sukses    : <?= ($result['debug']['step1_get_token']['success'] ?? false) ? 'YA' : 'TIDAK' ?>
+Body Sent  : <?= htmlspecialchars($result['debug']['step1_get_token']['raw']['body_sent'] ?? '-') ?>
+Hdr Auth   : Authorization: Bearer <?= htmlspecialchars(OAUTH_CLIENT_ID ?: '(kosong)') ?>
 
-HTTP Code : <?= htmlspecialchars((string)($result['debug']['step1_get_token']['raw']['http_code'] ?? '-')) ?>
+Cache File : <?= htmlspecialchars(CACHE_FILE_TF) ?>
+Dari Cache : <?= ($result['debug']['step1_get_token']['from_cache'] ?? false) ? 'YA' : 'TIDAK' ?>
 
-Error Msg : <?= htmlspecialchars($result['debug']['step1_get_token']['error'] ?? '-') ?>
-
-OAuth Raw : <?= htmlspecialchars($result['debug']['step1_get_token']['raw']['raw'] ?? '-') ?>
+Sukses     : <?= ($result['debug']['step1_get_token']['success'] ?? false) ? 'YA' : 'TIDAK' ?>
+HTTP Code  : <?= htmlspecialchars((string)($result['debug']['step1_get_token']['raw']['http_code'] ?? '-')) ?>
+Error Msg  : <?= htmlspecialchars($result['debug']['step1_get_token']['error'] ?? '-') ?>
+OAuth Raw  : <?= htmlspecialchars($result['debug']['step1_get_token']['raw']['raw'] ?? '-') ?>
 
 
 <span class="dc">━━ STEP 2: ISO 8583 REQUEST (MTI=010) ━━</span>

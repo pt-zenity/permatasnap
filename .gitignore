@@ -31,3 +31,7 @@ lerna-debug.log*
 
 # misc
 .DS_Store
+
+# SIS/Assist OAuth credentials (JANGAN commit file ini!)
+.assist.env
+assist.env

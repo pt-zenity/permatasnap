@@ -5,6 +5,17 @@
  * Script single-file PHP untuk melakukan inquiry BIFAST (Bank Indonesia Fast
  * Payment) melalui jalur SIS/Assist switching middleware (assist-switching_v3_pro).
  *
+ * AUTO-DETECTION dari source code assist-switching_v3_pro:
+ *   ✅ URL_GET_TOKEN, URL_DIGITAL, CICD, MFTFI → dari config/local_config.php
+ *   ✅ KODE_AGEN, MFTFI BIFAST → dari nama file storage/cds/cache/*snap_ft_bdi.cache
+ *   ⚙️  OAuth credentials → dari file .assist.env (disimpan di database, bukan file PHP)
+ *      Format .assist.env:
+ *        OAUTH_CLIENT_ID=xxxx
+ *        OAUTH_CLIENT_SECRET=xxxx
+ *        OAUTH_USERNAME=xxxx       ← UserH2H di tabel agen
+ *        OAUTH_PASSWORD=xxxx
+ *        DE061_SIM_SERIAL=xxxx     ← opsional
+ *
  * Alur transaksi (sesuai source code mbanking.controller.php):
  *   1. Ambil OAuth access token dari myassist.sis1.net
  *      Cache file: cds-auth-a-{KodeAgen}_{mftfi}-snap_ft_bdi.cache
@@ -17,7 +28,7 @@
  * Referensi: assist-switching_v3_pro v1.6.39 "Assist Pro Net"
  *   - config/local_config.php            → URL, cicd, mftfi
  *   - mvc/mbanking/mbanking.controller.php → ProsesInquiryPayment() + INQBIFAST
- *   - storage/cds/cache/*snap_ft_bdi.cache → token cache pattern
+ *   - storage/cds/cache/*snap_ft_bdi.cache → token cache pattern + KODE_AGEN
  *   - include/func.oauth.mod.php          → OAuth token management
  *
  * PHP 8.1+
@@ -26,44 +37,188 @@
 date_default_timezone_set('Asia/Jakarta');
 
 // ============================================================
-// KONFIGURASI — sesuaikan dengan environment / agen Anda
+// AUTO-DETECTION ENGINE
 // ============================================================
 
-// ── OAuth Token (myassist.sis1.net) ─────────────────────────
-define('URL_GET_TOKEN',  'http://myassist.sis1.net/assist-auth_api/public/oauth/getaccesstoken');
-define('URL_CEK_TOKEN',  'http://myassist.sis1.net/assist-auth_api/public/oauth/cekaccesstoken');
-define('URL_RFZ_TOKEN',  'http://myassist.sis1.net/assist-auth_api/public/oauth/getaccesstokenfromrefresh');
+/**
+ * Cari direktori root assist-switching_v3_pro secara otomatis.
+ */
+function detectAssistRoot(): string {
+    $markers = ['config/local_config.php', 'storage/cds/cache', 'sisproject/project.json'];
+    $dir = __DIR__;
+    for ($i = 0; $i < 6; $i++) {
+        $found = 0;
+        foreach ($markers as $m) {
+            if (file_exists($dir . '/' . $m)) $found++;
+        }
+        if ($found >= 2) return $dir;
+        $parent = dirname($dir);
+        if ($parent === $dir) break;
+        $dir = $parent;
+    }
+    return '';
+}
 
-// OAuth credential (diperoleh dari SIS/Assist administrator)
-define('OAUTH_CLIENT_ID',     '');     // client_id dari myassist
-define('OAUTH_CLIENT_SECRET', '');     // client_secret dari myassist
-define('OAUTH_USERNAME',      '');     // username H2H (UserH2H agen)
-define('OAUTH_PASSWORD',      '');     // password H2H
+/**
+ * Parse local_config.php menggunakan regex (tanpa require/eval).
+ */
+function parseLocalConfig(string $assistRoot): array {
+    $cfgFile = $assistRoot . '/config/local_config.php';
+    if (!file_exists($cfgFile)) return [];
 
-// ── Digital Server (digital.sis1.net) ───────────────────────
-define('URL_DIGITAL',    'http://digital.sis1.net/assist-digital.net/public/dgl');
-define('URL_DIGITAL_SS', 'http://digital.sis1.net/assist-digital.net/public/rgol');
+    $src  = file_get_contents($cfgFile);
+    $vals = [];
 
-// ── Identity & Integrity (dari local_config.php) ────────────
-define('CICD', 'db96e3cba196f76a6c31e4c9625614b3dc57619fba7e29ee534dd20c5c44855d');
+    preg_match_all(
+        '/\$config\[[\'"]([\w_]+)[\'"]\]\s*=\s*["\']([^"\']*)["\']/',
+        $src, $matches, PREG_SET_ORDER
+    );
+    foreach ($matches as $m) {
+        $vals[$m[1]] = $m[2];
+    }
 
-// ── Konfigurasi Agen ─────────────────────────────────────────
-// KodeAgen: kode agen yang terdaftar di SIS (ex: "A-000300")
-define('KODE_AGEN', '');
-// mftfi: kode mitra transfer BIFAST (dari local_config.php, default "002")
-// Catatan: cache file BIFAST menggunakan suffix snap_ft_bdi (bukan snap_tf_bank_permata)
-// ex: cds-auth-a-000300_0024-snap_ft_bdi.cache → mftfi "0024" untuk agen tertentu
-define('MFTFI', '002');
+    // Resolve concatenation: $config['X'] = $config['Y'] . "/suffix"
+    preg_match_all(
+        '/\$config\[[\'"]([\w_]+)[\'"]\]\s*=\s*\$config\[[\'"]([\w_]+)[\'"]\]\s*\.\s*["\']([^"\']*)["\']/',
+        $src, $concatMatches, PREG_SET_ORDER
+    );
+    foreach ($concatMatches as $m) {
+        $base = $vals[$m[2]] ?? '';
+        $vals[$m[1]] = $base . $m[3];
+    }
 
-// DE061: SIMSerial / device identifier dari tabel agen_fitur
-// Format: {KodeBank4digit}{serial}, digunakan oleh GetKodeAgenMobile()
-define('DE061_SIM_SERIAL', '');
+    return $vals;
+}
 
-// ── Token Cache (CDS pattern untuk BIFAST) ──────────────────
-// Cache file BIFAST: cds-auth-a-{KodeAgen}_{mftfi}-snap_ft_bdi.cache
-// BERBEDA dengan TF Permata yang menggunakan snap_tf_bank_permata.cache
-define('CACHE_DIR',         __DIR__ . '/storage/cds/cache');
-define('CACHE_FILE_BIFAST', CACHE_DIR . '/cds-auth-a-' . str_replace('A-', '', KODE_AGEN) . '_' . MFTFI . '-snap_ft_bdi.cache');
+/**
+ * Deteksi KODE_AGEN dan MFTFI dari nama file cache snap_ft_bdi (BIFAST).
+ * Pattern: cds-auth-a-{KodeAgen}_{mftfi}-snap_ft_bdi.cache
+ * Contoh: cds-auth-a-000300_0024-snap_ft_bdi.cache
+ *   → KodeAgen = "A-000300", mftfi = "0024"
+ */
+function detectFromCacheBIFAST(string $assistRoot): array {
+    $cacheDir = $assistRoot . '/storage/cds/cache';
+    if (!is_dir($cacheDir)) return ['kode_agen' => '', 'mftfi' => ''];
+
+    $files = glob($cacheDir . '/cds-auth-a-*-snap_ft_bdi.cache');
+    if (empty($files)) return ['kode_agen' => '', 'mftfi' => ''];
+
+    // Ambil file terbaru
+    usort($files, fn($a, $b) => filemtime($b) - filemtime($a));
+    $fname = basename($files[0]);
+
+    if (preg_match('/^cds-auth-a-(\d+)_(\w+)-snap_ft_bdi\.cache$/', $fname, $m)) {
+        return [
+            'kode_agen' => 'A-' . $m[1],
+            'mftfi'     => $m[2],
+            'raw_kode'  => $m[1],
+        ];
+    }
+
+    return ['kode_agen' => '', 'mftfi' => ''];
+}
+
+/**
+ * Baca OAuth credentials dari file .assist.env.
+ */
+function loadAssistEnv(): array {
+    $candidates = [
+        __DIR__ . '/.assist.env',
+        dirname(__DIR__) . '/.assist.env',
+        dirname(dirname(__DIR__)) . '/.assist.env',
+        __DIR__ . '/assist.env',
+        dirname(__DIR__) . '/assist.env',
+    ];
+
+    foreach ($candidates as $path) {
+        if (!file_exists($path)) continue;
+        $lines = file($path, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+        $env   = [];
+        foreach ($lines as $line) {
+            $line = trim($line);
+            if ($line === '' || $line[0] === '#') continue;
+            if (strpos($line, '=') === false) continue;
+            [$key, $val] = explode('=', $line, 2);
+            $env[trim($key)] = trim($val, " \t\"'");
+        }
+        if (!empty($env)) return array_merge($env, ['_env_file' => $path]);
+    }
+    return [];
+}
+
+// ────────────────────────────────────────────────────────────
+// Jalankan auto-detection
+// ────────────────────────────────────────────────────────────
+$_ASSIST_ROOT   = detectAssistRoot();
+$_LOCAL_CONFIG  = !empty($_ASSIST_ROOT) ? parseLocalConfig($_ASSIST_ROOT) : [];
+$_CACHE_BF      = !empty($_ASSIST_ROOT) ? detectFromCacheBIFAST($_ASSIST_ROOT) : [];
+$_ASSIST_ENV    = loadAssistEnv();
+
+$_DETECTION_LOG = [];
+
+// ── URLs ─────────────────────────────────────────────────────
+$_myAssistBase  = $_LOCAL_CONFIG['_URL_MY_ASSIST_'] ?? 'http://myassist.sis1.net/assist-auth_api/public';
+$_urlGetToken   = $_LOCAL_CONFIG['_URL_GET_TOKEN_'] ?? ($_myAssistBase . '/oauth/getaccesstoken');
+$_urlCekToken   = $_LOCAL_CONFIG['_URL_CEK_TOKEN_'] ?? ($_myAssistBase . '/oauth/cekaccesstoken');
+$_urlRfzToken   = $_LOCAL_CONFIG['_URL_RFZ_TOKEN_'] ?? ($_myAssistBase . '/oauth/getaccesstokenfromrefresh');
+$_urlDigital    = $_LOCAL_CONFIG['s']               ?? 'http://digital.sis1.net/assist-digital.net/public/dgl';
+$_urlDigitalSS  = $_LOCAL_CONFIG['ss']              ?? 'http://digital.sis1.net/assist-digital.net/public/rgol';
+$_cicd          = $_LOCAL_CONFIG['cicd']            ?? 'db96e3cba196f76a6c31e4c9625614b3dc57619fba7e29ee534dd20c5c44855d';
+$_mftfi         = $_CACHE_BF['mftfi']               ?? ($_LOCAL_CONFIG['mftfi'] ?? '002');
+
+$_DETECTION_LOG['assist_root']    = $_ASSIST_ROOT ?: '— tidak ditemukan (fallback ke default)';
+$_DETECTION_LOG['local_config']   = !empty($_LOCAL_CONFIG) ? '✅ Terbaca (' . count($_LOCAL_CONFIG) . ' keys)' : '⚠️ Tidak ditemukan';
+$_DETECTION_LOG['url_get_token']  = empty($_LOCAL_CONFIG['_URL_GET_TOKEN_']) ? '⚠️ fallback default' : '✅ dari local_config.php';
+$_DETECTION_LOG['url_digital']    = empty($_LOCAL_CONFIG['s'])               ? '⚠️ fallback default' : '✅ dari local_config.php';
+$_DETECTION_LOG['cicd']           = empty($_LOCAL_CONFIG['cicd'])            ? '⚠️ fallback default' : '✅ dari local_config.php';
+
+// ── KODE_AGEN + MFTFI BIFAST (dari cache file snap_ft_bdi) ───
+$_kodeAgen       = $_CACHE_BF['kode_agen'] ?? '';
+$_mftfiFromCache = !empty($_CACHE_BF['mftfi']);
+
+$_DETECTION_LOG['kode_agen_bifast'] = !empty($_kodeAgen) ? '✅ auto dari cache: ' . $_kodeAgen : '⚠️ tidak ditemukan (snap_ft_bdi.cache)';
+$_DETECTION_LOG['mftfi_bifast']     = $_mftfiFromCache    ? '✅ auto dari cache: ' . $_mftfi   : '⚠️ fallback dari local_config/default';
+
+// ── OAuth Credentials (dari .assist.env) ─────────────────────
+$_oauthClientId     = $_ASSIST_ENV['OAUTH_CLIENT_ID']     ?? '';
+$_oauthClientSecret = $_ASSIST_ENV['OAUTH_CLIENT_SECRET'] ?? '';
+$_oauthUsername     = $_ASSIST_ENV['OAUTH_USERNAME']      ?? '';
+$_oauthPassword     = $_ASSIST_ENV['OAUTH_PASSWORD']      ?? '';
+$_de061             = $_ASSIST_ENV['DE061_SIM_SERIAL']     ?? '';
+
+$_envFile = $_ASSIST_ENV['_env_file'] ?? '';
+$_DETECTION_LOG['oauth_env_file']  = !empty($_envFile)       ? '✅ ' . $_envFile         : '⚠️ .assist.env tidak ditemukan';
+$_DETECTION_LOG['oauth_client_id'] = !empty($_oauthClientId) ? '✅ terisi dari .assist.env' : '❌ belum diisi';
+$_DETECTION_LOG['oauth_username']  = !empty($_oauthUsername) ? '✅ terisi dari .assist.env' : '❌ belum diisi';
+$_DETECTION_LOG['de061_sim_serial']= !empty($_de061)         ? '✅ terisi dari .assist.env' : '⚠️ kosong';
+
+// ============================================================
+// DEFINISIKAN KONSTANTA (dari hasil auto-detection)
+// ============================================================
+
+define('URL_GET_TOKEN',  $_urlGetToken);
+define('URL_CEK_TOKEN',  $_urlCekToken);
+define('URL_RFZ_TOKEN',  $_urlRfzToken);
+define('URL_DIGITAL',    $_urlDigital);
+define('URL_DIGITAL_SS', $_urlDigitalSS);
+define('CICD',           $_cicd);
+define('MFTFI',          $_mftfi);
+define('KODE_AGEN',      $_kodeAgen);
+define('OAUTH_CLIENT_ID',     $_oauthClientId);
+define('OAUTH_CLIENT_SECRET', $_oauthClientSecret);
+define('OAUTH_USERNAME',      $_oauthUsername);
+define('OAUTH_PASSWORD',      $_oauthPassword);
+define('DE061_SIM_SERIAL',    $_de061);
+
+// ── Token Cache BIFAST (CDS pattern) ─────────────────────────
+$_cacheDir = !empty($_ASSIST_ROOT)
+    ? $_ASSIST_ROOT . '/storage/cds/cache'
+    : __DIR__ . '/storage/cds/cache';
+
+$_rawKode = $_CACHE_BF['raw_kode'] ?? str_replace('A-', '', KODE_AGEN);
+
+define('CACHE_DIR',         $_cacheDir);
+define('CACHE_FILE_BIFAST', CACHE_DIR . '/cds-auth-a-' . $_rawKode . '_' . MFTFI . '-snap_ft_bdi.cache');
 
 // ── Opsi ────────────────────────────────────────────────────
 define('CURL_TIMEOUT', 30);
@@ -71,6 +226,12 @@ define('DEBUG_MODE',   true);
 
 // Maksimum nominal BIFAST: Rp 200 juta per transaksi
 define('BIFAST_MAX_AMOUNT', 200000000);
+
+// Bersihkan variabel sementara
+unset($_myAssistBase, $_urlGetToken, $_urlCekToken, $_urlRfzToken,
+      $_urlDigital, $_urlDigitalSS, $_cicd, $_mftfi, $_mftfiFromCache,
+      $_kodeAgen, $_rawKode, $_cacheDir, $_envFile,
+      $_oauthClientId, $_oauthClientSecret, $_oauthUsername, $_oauthPassword, $_de061);
 
 // ============================================================
 // FUNGSI HELPER
@@ -516,9 +677,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'inqui
     } elseif (empty($formData['kode_bank'])) {
         $errorMessage = 'Kode bank tujuan wajib diisi!';
     } elseif (KODE_AGEN === '') {
-        $errorMessage = '⚠️ KODE_AGEN belum dikonfigurasi! Edit konstanta di bagian atas script.';
+        $errorMessage = '⚠️ KODE_AGEN tidak terdeteksi! Pastikan ada file cache snap_ft_bdi.cache di storage/cds/cache/ dalam direktori assist-switching_v3_pro.';
     } elseif (OAUTH_CLIENT_ID === '' && OAUTH_USERNAME === '') {
-        $errorMessage = '⚠️ Kredensial OAuth belum dikonfigurasi (OAUTH_CLIENT_ID / OAUTH_USERNAME).';
+        $errorMessage = '⚠️ Kredensial OAuth belum dikonfigurasi! Buat file .assist.env dengan isi: OAUTH_CLIENT_ID, OAUTH_CLIENT_SECRET, OAUTH_USERNAME, OAUTH_PASSWORD.';
     } else {
         // Cek batas nominal BIFAST
         $nominal = (int)preg_replace('/\D/', '', $formData['nominal'] ?? '0');
@@ -578,7 +739,7 @@ $daftarBankBIC = [
     'HANAIDIDK'  => 'Bank KEB Hana',
 ];
 
-$isConfigured = (KODE_AGEN !== '' && OAUTH_CLIENT_ID !== '' && DE061_SIM_SERIAL !== '');
+$isConfigured = (KODE_AGEN !== '' && OAUTH_CLIENT_ID !== '' && OAUTH_USERNAME !== '');
 ?>
 <!DOCTYPE html>
 <html lang="id">
@@ -856,14 +1017,28 @@ $isConfigured = (KODE_AGEN !== '' && OAUTH_CLIENT_ID !== '' && DE061_SIM_SERIAL 
             <span class="ch-badge"><?= $isConfigured ? '✅ Siap' : '⚠️ Belum Lengkap' ?></span>
         </div>
         <div class="card-body" style="padding:18px 24px;">
+
+            <!-- Detection Log -->
+            <div style="background:#ecfdf5;border:1px solid #6ee7b7;border-radius:10px;padding:12px 16px;margin-bottom:16px;font-size:.8rem;">
+                <div style="font-weight:800;color:#065f46;margin-bottom:6px;">🔍 Auto-Detection Report (BIFAST)</div>
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:3px 16px;">
+                <?php foreach ($_DETECTION_LOG as $k => $v): ?>
+                    <div><span style="color:#64748b;font-family:monospace;"><?= htmlspecialchars($k) ?></span>: <span><?= htmlspecialchars($v) ?></span></div>
+                <?php endforeach; ?>
+                </div>
+                <?php if (!empty($_ASSIST_ROOT)): ?>
+                <div style="margin-top:6px;color:#065f46;">📂 Assist Root: <code><?= htmlspecialchars($_ASSIST_ROOT) ?></code></div>
+                <?php endif; ?>
+            </div>
+
             <div class="config-grid">
                 <div class="cfg">
                     <div class="cg-l">Token URL</div>
-                    <div class="cg-v ok">myassist.sis1.net</div>
+                    <div class="cg-v ok" title="<?= htmlspecialchars(URL_GET_TOKEN) ?>">myassist.sis1.net ✓</div>
                 </div>
                 <div class="cfg">
                     <div class="cg-l">Digital Server</div>
-                    <div class="cg-v ok">digital.sis1.net/dgl</div>
+                    <div class="cg-v ok" title="<?= htmlspecialchars(URL_DIGITAL) ?>">digital.sis1.net/dgl ✓</div>
                 </div>
                 <div class="cfg">
                     <div class="cg-l">mftfi (BIFAST)</div>
@@ -872,23 +1047,23 @@ $isConfigured = (KODE_AGEN !== '' && OAUTH_CLIENT_ID !== '' && DE061_SIM_SERIAL 
                 <div class="cfg">
                     <div class="cg-l">Kode Agen</div>
                     <div class="cg-v <?= KODE_AGEN !== '' ? 'ok' : 'err' ?>">
-                        <?= KODE_AGEN !== '' ? htmlspecialchars(KODE_AGEN) : '⚠ Belum diisi' ?>
+                        <?= KODE_AGEN !== '' ? htmlspecialchars(KODE_AGEN) : '⚠ Tidak terdeteksi' ?>
                     </div>
                 </div>
                 <div class="cfg">
-                    <div class="cg-l">OAuth Credential</div>
+                    <div class="cg-l">OAuth Client ID</div>
                     <div class="cg-v <?= OAUTH_CLIENT_ID !== '' ? 'ok' : 'warn' ?>">
-                        <?= OAUTH_CLIENT_ID !== '' ? '✓ Terisi' : '— Belum diisi' ?>
+                        <?= OAUTH_CLIENT_ID !== '' ? '✓ Terisi (.assist.env)' : '— Isi di .assist.env' ?>
                     </div>
                 </div>
                 <div class="cfg">
                     <div class="cg-l">cicd Identity</div>
-                    <div class="cg-v ok" style="font-size:.68rem;"><?= substr(CICD, 0, 16) ?>…</div>
+                    <div class="cg-v ok" style="font-size:.68rem;" title="<?= htmlspecialchars(CICD) ?>"><?= substr(CICD, 0, 16) ?>…</div>
                 </div>
                 <div class="cfg">
-                    <div class="cg-l">DE061 / SIMSerial</div>
-                    <div class="cg-v <?= DE061_SIM_SERIAL !== '' ? 'ok' : 'warn' ?>">
-                        <?= DE061_SIM_SERIAL !== '' ? '✓ Terisi' : '— Belum diisi' ?>
+                    <div class="cg-l">OAuth Username</div>
+                    <div class="cg-v <?= OAUTH_USERNAME !== '' ? 'ok' : 'warn' ?>">
+                        <?= OAUTH_USERNAME !== '' ? '✓ ' . htmlspecialchars(substr(OAUTH_USERNAME, 0, 8)) . '…' : '— Isi di .assist.env' ?>
                     </div>
                 </div>
                 <div class="cfg">
@@ -899,16 +1074,21 @@ $isConfigured = (KODE_AGEN !== '' && OAUTH_CLIENT_ID !== '' && DE061_SIM_SERIAL 
                     </div>
                 </div>
                 <div class="cfg">
-                    <div class="cg-l">Signing</div>
-                    <div class="cg-v ok">SHA256(body+time)</div>
+                    <div class="cg-l">DE061 / SIMSerial</div>
+                    <div class="cg-v <?= DE061_SIM_SERIAL !== '' ? 'ok' : 'warn' ?>">
+                        <?= DE061_SIM_SERIAL !== '' ? '✓ Terisi' : '— Opsional' ?>
+                    </div>
                 </div>
             </div>
             <div class="alert alert-info" style="margin-bottom:0;font-size:.84rem;">
                 <span class="ai">ℹ️</span>
                 <div>
-                    Cache file BIFAST menggunakan suffix <code style="background:#bbf7d0;padding:1px 5px;border-radius:3px;">snap_ft_bdi.cache</code>
-                    (berbeda dari TF Permata yang menggunakan <code>snap_tf_bank_permata.cache</code>).
-                    DE048 ditetapkan: <code style="background:#bbf7d0;padding:1px 5px;border-radius:3px;">0601*1001*INQBIFAST~~BLTRFAG</code>.
+                    Cache BIFAST menggunakan suffix <code style="background:#bbf7d0;padding:1px 5px;border-radius:3px;">snap_ft_bdi.cache</code>
+                    (berbeda dari TF Permata: <code>snap_tf_bank_permata.cache</code>).
+                    DE048: <code style="background:#bbf7d0;padding:1px 5px;border-radius:3px;">0601*1001*INQBIFAST~~BLTRFAG</code>.
+                    <?php if (!$isConfigured): ?>
+                    <br><strong style="color:#b45309;">Buat <code>.assist.env</code> dengan isi: OAUTH_CLIENT_ID, OAUTH_CLIENT_SECRET, OAUTH_USERNAME, OAUTH_PASSWORD.</strong>
+                    <?php endif; ?>
                 </div>
             </div>
         </div>

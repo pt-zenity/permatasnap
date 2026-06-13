@@ -5,16 +5,22 @@
  * Script single-file PHP untuk melakukan inquiry BIFAST (Bank Indonesia Fast
  * Payment) melalui jalur SIS/Assist switching middleware (assist-switching_v3_pro).
  *
- * AUTO-DETECTION dari source code assist-switching_v3_pro:
+ * AUTO-DETECTION dari source code assist-switching_v3_pro & assist-bpr.net:
  *   ✅ URL_GET_TOKEN, URL_DIGITAL, CICD, MFTFI → dari config/local_config.php
  *   ✅ KODE_AGEN, MFTFI BIFAST → dari nama file storage/cds/cache/*snap_ft_bdi.cache
- *   ⚙️  OAuth credentials → dari file .assist.env (disimpan di database, bukan file PHP)
- *      Format .assist.env:
- *        OAUTH_CLIENT_ID=xxxx
- *        OAUTH_CLIENT_SECRET=xxxx
- *        OAUTH_USERNAME=xxxx       ← UserH2H di tabel agen
- *        OAUTH_PASSWORD=xxxx
- *        DE061_SIM_SERIAL=xxxx     ← opsional
+ *   ✅ OAuth credentials (auto-detect, urutan prioritas):
+ *      1. File .assist.env (format KEY=VALUE):
+ *           OAUTH_CLIENT_ID=xxxx
+ *           OAUTH_CLIENT_SECRET=xxxx
+ *           OAUTH_USERNAME=xxxx       ← UserH2H di tabel agen
+ *           OAUTH_PASSWORD=xxxx
+ *           DE061_SIM_SERIAL=xxxx     ← opsional
+ *      2. assist-bpr.net/env/{kode}_.env (format key = value, spasi sekitar =):
+ *           auth_client_id = xxxx     → OAUTH_CLIENT_ID
+ *           auth_client_secret = xxxx → OAUTH_CLIENT_SECRET
+ *           username = Assist         → OAUTH_USERNAME (default H2H)
+ *           password = Irac           → OAUTH_PASSWORD (default H2H)
+ *           auth_server_uri = https://one.myassist.id
  *
  * Alur transaksi (sesuai source code mbanking.controller.php):
  *   1. Ambil OAuth access token dari myassist.sis1.net
@@ -146,6 +152,106 @@ function loadAssistEnv(): array {
     return [];
 }
 
+/**
+ * Cari direktori root assist-bpr.net secara otomatis.
+ * Markers: direktori env/ berisi file *.env + bin/connect.php
+ * Pencarian dari __DIR__ ke atas, maks 8 level.
+ */
+function detectAssistBprRoot(): string {
+    $dir = __DIR__;
+    for ($i = 0; $i < 8; $i++) {
+        if (is_dir($dir . '/env') && file_exists($dir . '/bin/connect.php')) {
+            $envFiles = glob($dir . '/env/*.env') ?: [];
+            if (!empty($envFiles)) return $dir;
+        }
+        // Cek juga subdirektori bernama assist-bpr.net atau assist-bpr
+        foreach (['assist-bpr.net', 'assist-bpr', 'assistbpr'] as $sub) {
+            $candidate = $dir . '/' . $sub;
+            if (is_dir($candidate . '/env') && file_exists($candidate . '/bin/connect.php')) {
+                $envFiles = glob($candidate . '/env/*.env') ?: [];
+                if (!empty($envFiles)) return $candidate;
+            }
+        }
+        $parent = dirname($dir);
+        if ($parent === $dir) break;
+        $dir = $parent;
+    }
+    return '';
+}
+
+/**
+ * Baca OAuth credentials dari assist-bpr.net/env/{kode}_.env
+ *
+ * Format file: key = value  (dengan spasi di sekitar tanda =)
+ * Contoh:
+ *   auth_client_id = 000143
+ *   auth_client_secret = 53f2cb55aa3a3ea5f7f523a2a22cc36...
+ *   username = Assist
+ *   password = Irac
+ *   auth_server_uri = https://one.myassist.id/
+ *   base_url_auth = https://auth.myassist.id/
+ *
+ * Mapping ke konstanta standar:
+ *   auth_client_id     → OAUTH_CLIENT_ID
+ *   auth_client_secret → OAUTH_CLIENT_SECRET
+ *   username           → OAUTH_USERNAME
+ *   password           → OAUTH_PASSWORD
+ *
+ * @param string $assistBprRoot  Path root assist-bpr.net (dari detectAssistBprRoot())
+ * @param string $rawKode        Kode numerik agen, mis. "000268" (dari cache filename)
+ */
+function detectFromAssistBprEnv(string $assistBprRoot, string $rawKode = ''): array {
+    $envDir = $assistBprRoot . '/env';
+    if (!is_dir($envDir)) return [];
+
+    // Daftar kandidat file: kode spesifik dulu, lalu semua file numerik
+    $candidates = [];
+    if (!empty($rawKode)) {
+        $candidates[] = $envDir . '/' . $rawKode . '_.env';
+        $noLeading = ltrim($rawKode, '0');
+        if ($noLeading !== $rawKode && $noLeading !== '') {
+            $candidates[] = $envDir . '/' . $noLeading . '_.env';
+        }
+    }
+    // Fallback: semua file env numerik, diurutkan (terbaru dulu)
+    $allNumericEnv = glob($envDir . '/[0-9]*.env') ?: [];
+    usort($allNumericEnv, fn($a, $b) => filemtime($b) - filemtime($a));
+    $candidates = array_merge($candidates, $allNumericEnv);
+    $candidates = array_unique($candidates);
+
+    foreach ($candidates as $path) {
+        if (!file_exists($path)) continue;
+        $lines = file($path, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+        if ($lines === false) continue;
+        $raw = [];
+        foreach ($lines as $line) {
+            $line = trim($line);
+            if ($line === '' || $line[0] === '#') continue;
+            if (strpos($line, '=') === false) continue;
+            [$k, $v] = explode('=', $line, 2);
+            $raw[trim($k)] = trim($v);
+        }
+        // File valid harus punya auth_client_id atau OAUTH_CLIENT_ID
+        if (empty($raw['auth_client_id']) && empty($raw['OAUTH_CLIENT_ID'])) continue;
+
+        $oauthServerUri = rtrim(
+            $raw['auth_server_uri'] ?? $raw['base_url_auth'] ?? '',
+            '/'
+        );
+
+        return [
+            'OAUTH_CLIENT_ID'     => $raw['auth_client_id']    ?? $raw['OAUTH_CLIENT_ID'] ?? '',
+            'OAUTH_CLIENT_SECRET' => $raw['auth_client_secret'] ?? '',
+            'OAUTH_USERNAME'      => $raw['username']           ?? '',
+            'OAUTH_PASSWORD'      => $raw['password']           ?? '',
+            'OAUTH_SERVER_URI'    => $oauthServerUri,
+            '_env_file'           => $path,
+            '_source'             => 'assist-bpr.net/env',
+        ];
+    }
+    return [];
+}
+
 // ────────────────────────────────────────────────────────────
 // Jalankan auto-detection
 // ────────────────────────────────────────────────────────────
@@ -153,6 +259,13 @@ $_ASSIST_ROOT   = detectAssistRoot();
 $_LOCAL_CONFIG  = !empty($_ASSIST_ROOT) ? parseLocalConfig($_ASSIST_ROOT) : [];
 $_CACHE_BF      = !empty($_ASSIST_ROOT) ? detectFromCacheBIFAST($_ASSIST_ROOT) : [];
 $_ASSIST_ENV    = loadAssistEnv();
+
+// Auto-detect assist-bpr.net (sumber OAuth tambahan)
+$_ASSIST_BPR_ROOT = detectAssistBprRoot();
+$_RAW_KODE_BF     = $_CACHE_BF['raw_kode'] ?? '';
+$_BPR_ENV         = !empty($_ASSIST_BPR_ROOT)
+    ? detectFromAssistBprEnv($_ASSIST_BPR_ROOT, $_RAW_KODE_BF)
+    : [];
 
 $_DETECTION_LOG = [];
 
@@ -179,18 +292,40 @@ $_mftfiFromCache = !empty($_CACHE_BF['mftfi']);
 $_DETECTION_LOG['kode_agen_bifast'] = !empty($_kodeAgen) ? '✅ auto dari cache: ' . $_kodeAgen : '⚠️ tidak ditemukan (snap_ft_bdi.cache)';
 $_DETECTION_LOG['mftfi_bifast']     = $_mftfiFromCache    ? '✅ auto dari cache: ' . $_mftfi   : '⚠️ fallback dari local_config/default';
 
-// ── OAuth Credentials (dari .assist.env) ─────────────────────
+// ── OAuth Credentials (prioritas: .assist.env > assist-bpr.net/env/) ──────
+// Sumber 1: .assist.env (format KEY=VALUE)
 $_oauthClientId     = $_ASSIST_ENV['OAUTH_CLIENT_ID']     ?? '';
 $_oauthClientSecret = $_ASSIST_ENV['OAUTH_CLIENT_SECRET'] ?? '';
 $_oauthUsername     = $_ASSIST_ENV['OAUTH_USERNAME']      ?? '';
 $_oauthPassword     = $_ASSIST_ENV['OAUTH_PASSWORD']      ?? '';
 $_de061             = $_ASSIST_ENV['DE061_SIM_SERIAL']     ?? '';
+$_oauthSource       = !empty($_oauthClientId) ? '.assist.env' : '';
 
-$_envFile = $_ASSIST_ENV['_env_file'] ?? '';
-$_DETECTION_LOG['oauth_env_file']  = !empty($_envFile)       ? '✅ ' . $_envFile         : '⚠️ .assist.env tidak ditemukan';
-$_DETECTION_LOG['oauth_client_id'] = !empty($_oauthClientId) ? '✅ terisi dari .assist.env' : '❌ belum diisi';
-$_DETECTION_LOG['oauth_username']  = !empty($_oauthUsername) ? '✅ terisi dari .assist.env' : '❌ belum diisi';
-$_DETECTION_LOG['de061_sim_serial']= !empty($_de061)         ? '✅ terisi dari .assist.env' : '⚠️ kosong';
+// Sumber 2: assist-bpr.net/env/{kode}_.env — fallback jika .assist.env kosong
+if (empty($_oauthClientId) && !empty($_BPR_ENV['OAUTH_CLIENT_ID'])) {
+    $_oauthClientId     = $_BPR_ENV['OAUTH_CLIENT_ID'];
+    $_oauthClientSecret = $_BPR_ENV['OAUTH_CLIENT_SECRET'] ?? '';
+    $_oauthUsername     = $_BPR_ENV['OAUTH_USERNAME']      ?? '';
+    $_oauthPassword     = $_BPR_ENV['OAUTH_PASSWORD']      ?? '';
+    $_oauthSource       = 'assist-bpr.net/env';
+} elseif (empty($_oauthClientSecret) && !empty($_BPR_ENV['OAUTH_CLIENT_SECRET'])) {
+    // Partial fill: client_id ada di .assist.env tapi secret kosong → ambil dari bpr
+    $_oauthClientSecret = $_BPR_ENV['OAUTH_CLIENT_SECRET'];
+    if (empty($_oauthUsername)) $_oauthUsername = $_BPR_ENV['OAUTH_USERNAME'] ?? '';
+    if (empty($_oauthPassword)) $_oauthPassword = $_BPR_ENV['OAUTH_PASSWORD'] ?? '';
+    $_oauthSource .= '+assist-bpr.net/env';
+}
+
+$_envFile = !empty($_oauthSource) && str_contains($_oauthSource, 'bpr')
+    ? ($_BPR_ENV['_env_file'] ?? ($_ASSIST_ENV['_env_file'] ?? ''))
+    : ($_ASSIST_ENV['_env_file'] ?? '');
+
+$_DETECTION_LOG['assist_bpr_root']  = !empty($_ASSIST_BPR_ROOT) ? '✅ ' . $_ASSIST_BPR_ROOT : '— tidak ditemukan';
+$_DETECTION_LOG['oauth_env_file']   = !empty($_envFile)         ? '✅ ' . $_envFile          : '⚠️ env tidak ditemukan';
+$_DETECTION_LOG['oauth_source']     = !empty($_oauthSource)     ? '✅ ' . $_oauthSource      : '❌ tidak ada sumber OAuth';
+$_DETECTION_LOG['oauth_client_id']  = !empty($_oauthClientId)   ? '✅ terisi (' . $_oauthSource . ')' : '❌ belum diisi';
+$_DETECTION_LOG['oauth_username']   = !empty($_oauthUsername)   ? '✅ terisi (' . $_oauthSource . ')' : '❌ belum diisi';
+$_DETECTION_LOG['de061_sim_serial'] = !empty($_de061)           ? '✅ terisi dari .assist.env' : '⚠️ kosong';
 
 // ============================================================
 // DEFINISIKAN KONSTANTA (dari hasil auto-detection)
@@ -230,8 +365,9 @@ define('BIFAST_MAX_AMOUNT', 200000000);
 // Bersihkan variabel sementara
 unset($_myAssistBase, $_urlGetToken, $_urlCekToken, $_urlRfzToken,
       $_urlDigital, $_urlDigitalSS, $_cicd, $_mftfi, $_mftfiFromCache,
-      $_kodeAgen, $_rawKode, $_cacheDir, $_envFile,
-      $_oauthClientId, $_oauthClientSecret, $_oauthUsername, $_oauthPassword, $_de061);
+      $_kodeAgen, $_rawKode, $_cacheDir, $_envFile, $_oauthSource,
+      $_oauthClientId, $_oauthClientSecret, $_oauthUsername, $_oauthPassword, $_de061,
+      $_ASSIST_BPR_ROOT, $_RAW_KODE_BF, $_BPR_ENV);
 
 // ============================================================
 // FUNGSI HELPER

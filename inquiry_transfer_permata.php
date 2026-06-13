@@ -1,0 +1,1171 @@
+<?php
+/**
+ * Inquiry Transfer Bank via Permata (SIS/Assist Switching Middleware)
+ * =====================================================================
+ * Script single-file PHP untuk melakukan inquiry transfer bank melalui
+ * jalur SIS/Assist switching middleware (assist-switching_v3_pro).
+ *
+ * Mendukung jenis transfer:
+ *   - TFDANA  (Transfer Dana Online / SKN Real-Time)
+ *   - LLG     (Lalu Lintas Giro / SKN Batch)
+ *   - RTGS    (Real-Time Gross Settlement)
+ *
+ * Alur transaksi (sesuai source code mbanking.controller.php):
+ *   1. Ambil OAuth access token dari myassist.sis1.net
+ *   2. Bangun pesan ISO 8583-like JSON (MTI="010", MSG dengan DE fields)
+ *   3. Kirim POST ke digital.sis1.net/assist-digital.net/public/dgl
+ *      dengan header: authorization (SHA256), identity (cicd), datetime
+ *   4. Response di-parse dari ISO 8583 array
+ *
+ * Referensi: assist-switching_v3_pro v1.6.39 "Assist Pro Net"
+ *   - config/local_config.php
+ *   - mvc/mbanking/mbanking.controller.php → ProsesInquiryPayment()
+ *   - include/func.oauth.mod.php
+ *
+ * PHP 8.1+
+ */
+
+date_default_timezone_set('Asia/Jakarta');
+
+// ============================================================
+// KONFIGURASI — sesuaikan dengan environment / agen Anda
+// ============================================================
+
+// ── OAuth Token (myassist.sis1.net) ─────────────────────────
+define('URL_GET_TOKEN',  'http://myassist.sis1.net/assist-auth_api/public/oauth/getaccesstoken');
+define('URL_CEK_TOKEN',  'http://myassist.sis1.net/assist-auth_api/public/oauth/cekaccesstoken');
+define('URL_RFZ_TOKEN',  'http://myassist.sis1.net/assist-auth_api/public/oauth/getaccesstokenfromrefresh');
+
+// OAuth credential (diperoleh dari SIS/Assist administrator)
+define('OAUTH_CLIENT_ID',     '');     // client_id dari myassist
+define('OAUTH_CLIENT_SECRET', '');     // client_secret dari myassist
+define('OAUTH_USERNAME',      '');     // username H2H (UserH2H agen)
+define('OAUTH_PASSWORD',      '');     // password H2H
+
+// ── Digital Server (digital.sis1.net) ───────────────────────
+define('URL_DIGITAL',   'http://digital.sis1.net/assist-digital.net/public/dgl');
+define('URL_DIGITAL_SS','http://digital.sis1.net/assist-digital.net/public/rgol');
+
+// ── Identity & Integrity (dari local_config.php) ────────────
+define('CICD', 'db96e3cba196f76a6c31e4c9625614b3dc57619fba7e29ee534dd20c5c44855d');
+
+// ── Konfigurasi Agen ─────────────────────────────────────────
+// KodeAgen: kode agen yang terdaftar di SIS (ex: "A-000268")
+define('KODE_AGEN', '');
+// mftfi: kode mitra transfer (dari local_config.php, default "002")
+define('MFTFI', '002');
+
+// DE061: SIMSerial / device identifier dari tabel agen_fitur
+// Format: {KodeBank4digit}{serial}, digunakan oleh GetKodeAgenMobile()
+// Contoh: "00268" + serial perangkat
+define('DE061_SIM_SERIAL', '');
+
+// ── Token Cache (CDS pattern) ────────────────────────────────
+// Cache file: cds-auth-a-{KodeAgen}_{mftfi}-snap_tf_bank_permata.cache
+// Disimpan di direktori storage/cds/cache/ (buat folder jika belum ada)
+define('CACHE_DIR',  __DIR__ . '/storage/cds/cache');
+define('CACHE_FILE_TF', CACHE_DIR . '/cds-auth-a-' . str_replace('A-', '', KODE_AGEN) . '_' . MFTFI . '-snap_tf_bank_permata.cache');
+
+// ── Opsi ────────────────────────────────────────────────────
+define('CURL_TIMEOUT', 30);
+define('DEBUG_MODE',   true);
+
+// ============================================================
+// FUNGSI HELPER
+// ============================================================
+
+/**
+ * SNow() — timestamp fungsi sesuai source code Assist
+ * Format: Y-m-d H:i:s (WIB)
+ */
+function SNow(): string {
+    return date('Y-m-d H:i:s');
+}
+
+/**
+ * Buat direktori cache jika belum ada
+ */
+function ensureCacheDir(): void {
+    if (!is_dir(CACHE_DIR)) {
+        @mkdir(CACHE_DIR, 0755, true);
+    }
+}
+
+/**
+ * Simpan token ke cache file (CDS pattern)
+ * Format cache: JSON {access_token, expires_in, cached_at, refresh_token}
+ */
+function saveTokenCache(array $tokenData): void {
+    ensureCacheDir();
+    $cache = [
+        'access_token'  => $tokenData['access_token']  ?? '',
+        'refresh_token' => $tokenData['refresh_token'] ?? '',
+        'expires_in'    => $tokenData['expires_in']    ?? 3600,
+        'cached_at'     => time(),
+        'token_type'    => $tokenData['token_type']    ?? 'Bearer',
+    ];
+    @file_put_contents(CACHE_FILE_TF, json_encode($cache));
+}
+
+/**
+ * Baca token dari cache file
+ * Return null jika cache tidak ada / expired
+ */
+function readTokenCache(): ?string {
+    if (!file_exists(CACHE_FILE_TF)) return null;
+    $raw   = @file_get_contents(CACHE_FILE_TF);
+    if (!$raw) return null;
+    $cache = json_decode($raw, true);
+    if (empty($cache['access_token'])) return null;
+    // Cek expiry: expires_in dikurangi 60 detik buffer
+    $expiresAt = ($cache['cached_at'] ?? 0) + ($cache['expires_in'] ?? 3600) - 60;
+    if (time() > $expiresAt) return null;
+    return $cache['access_token'];
+}
+
+/**
+ * HTTP POST menggunakan cURL
+ * Mendukung form-urlencoded (default) dan JSON
+ */
+function sendHttpPost(string $url, string $body, array $headers, bool $isJson = false): array {
+    $ch = curl_init();
+    curl_setopt_array($ch, [
+        CURLOPT_URL            => $url,
+        CURLOPT_POST           => true,
+        CURLOPT_POSTFIELDS     => $body,
+        CURLOPT_HTTPHEADER     => $headers,
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_TIMEOUT        => CURL_TIMEOUT,
+        CURLOPT_SSL_VERIFYPEER => false,
+        CURLOPT_SSL_VERIFYHOST => false,
+        CURLOPT_FOLLOWLOCATION => true,
+    ]);
+    $t0   = microtime(true);
+    $raw  = curl_exec($ch);
+    $ms   = round((microtime(true) - $t0) * 1000);
+    $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $err  = curl_error($ch);
+    curl_close($ch);
+    return [
+        'http_code'  => $code,
+        'raw'        => $raw ?? '',
+        'data'       => json_decode($raw ?? '', true) ?? [],
+        'curl_error' => $err,
+        'elapsed_ms' => $ms,
+        'url'        => $url,
+        'body_sent'  => $body,
+        'headers'    => $headers,
+    ];
+}
+
+/**
+ * Ambil OAuth Access Token dari myassist.sis1.net
+ * Sesuai func.oauth.mod.php → menggunakan grant_type=password / client_credentials
+ *
+ * Request format (form-urlencoded):
+ *   grant_type=password&username=&password=&client_id=&client_secret=
+ */
+function getAccessToken(): array {
+    // 1. Coba ambil dari cache
+    $cached = readTokenCache();
+    if ($cached) {
+        return ['success' => true, 'token' => $cached, 'from_cache' => true];
+    }
+
+    // 2. Request token baru
+    $body = http_build_query([
+        'grant_type'    => 'password',
+        'username'      => OAUTH_USERNAME,
+        'password'      => OAUTH_PASSWORD,
+        'client_id'     => OAUTH_CLIENT_ID,
+        'client_secret' => OAUTH_CLIENT_SECRET,
+    ]);
+
+    $headers = [
+        'Content-Type: application/x-www-form-urlencoded',
+        'Accept: application/json',
+    ];
+
+    $result = sendHttpPost(URL_GET_TOKEN, $body, $headers);
+
+    if (!empty($result['curl_error'])) {
+        return ['success' => false, 'error' => 'cURL: ' . $result['curl_error'], 'raw' => $result];
+    }
+
+    $data = $result['data'];
+
+    // Response sukses: {"access_token":"...", "token_type":"Bearer", "expires_in":3600, ...}
+    if (!empty($data['access_token'])) {
+        saveTokenCache($data);
+        return ['success' => true, 'token' => $data['access_token'], 'from_cache' => false, 'raw' => $result];
+    }
+
+    // Coba juga sebagai client_credentials
+    if ($result['http_code'] !== 200) {
+        $body2 = http_build_query([
+            'grant_type'    => 'client_credentials',
+            'client_id'     => OAUTH_CLIENT_ID,
+            'client_secret' => OAUTH_CLIENT_SECRET,
+        ]);
+        $result2 = sendHttpPost(URL_GET_TOKEN, $body2, $headers);
+        $data2   = $result2['data'];
+        if (!empty($data2['access_token'])) {
+            saveTokenCache($data2);
+            return ['success' => true, 'token' => $data2['access_token'], 'from_cache' => false, 'raw' => $result2];
+        }
+    }
+
+    $errMsg = $data['error_description'] ?? $data['message'] ?? ('HTTP ' . $result['http_code']);
+    return ['success' => false, 'error' => $errMsg, 'raw' => $result];
+}
+
+/**
+ * Bangun DE048 sesuai format ISO 8583 Assist
+ *
+ * Dari source (mbanking.controller.php):
+ *   $vaDE048 = split("*", $cRequest['DE048']);  → 3 bagian dipisah *
+ *   $vaTrx   = split("~~", $vaDE048[2]);         → bagian ke-2 dipisah ~~
+ *   Format: {part1}*{part2}*{TrxCode}~~{SubCode}
+ *
+ * Contoh DE048 yang terlihat di source:
+ *   INQTFDANA: "0601*1001*INQTFDANA~~BLTRFAG"
+ *   INQLLG:    "0201*1001*INQLLG~~BLTRFAG"
+ *   INQRTGS:   "0801*1001*INQRTGS~~BLTRFAG"
+ *
+ * Part1 = kode kategori, Part2 = kode produk internal, TrxCode = kode transaksi Assist
+ */
+function buildDE048(string $jenisTF): string {
+    $map = [
+        'TFDANA' => '0601*1001*INQTFDANA~~BLTRFAG',
+        'LLG'    => '0201*1001*INQLLG~~BLTRFAG',
+        'RTGS'   => '0801*1001*INQRTGS~~BLTRFAG',
+    ];
+    return $map[strtoupper($jenisTF)] ?? $map['TFDANA'];
+}
+
+/**
+ * JSON2ISO — bangun string ISO 8583 serialized sesuai MBankingFunc::JSON2ISO
+ *
+ * Signature dari source:
+ *   MBankingFunc::JSON2ISO(false, DE003, DE004, DE012, DE013, DE037, RC, DE044, DE048, DE052, DE061, DE102, DE103)
+ *
+ * Format output: JSON array dengan key MTI, RC, MSG (DE fields)
+ * Digunakan untuk membangun request ke digital server.
+ *
+ * Untuk INQUIRY (MTI=010), field yang dikirim:
+ *   DE003  = processing code (ex: "231041" untuk payment inquiry)
+ *   DE004  = amount (12 digit, ex: "000000000000")
+ *   DE012  = local time (HHmm, ex: "1430")
+ *   DE013  = local date (ddMM, ex: "1206")
+ *   DE037  = retrieval reference number (12 digit)
+ *   DE044  = additional response data (biasanya "0")
+ *   DE048  = additional data (kode transaksi, ex: "0601*1001*INQTFDANA~~BLTRFAG")
+ *   DE052  = PIN data (64 zero untuk inquiry)
+ *   DE061  = SIMSerial / device identifier
+ *   DE102  = account identification 1 (nomor rekening tujuan)
+ *   DE103  = account identification 2 (kode bank tujuan)
+ */
+function buildISO8583Request(array $params, string $accessToken): array {
+    $jenisTF       = strtoupper($params['jenis_transfer'] ?? 'TFDANA');
+    $nomorRekening = preg_replace('/\D/', '', $params['nomor_rekening'] ?? '');
+    $kodeBank      = $params['kode_bank'] ?? '';
+    $nominal       = (int)preg_replace('/\D/', '', $params['nominal'] ?? '0');
+
+    // DE004: nominal dalam format 12 digit + "00" (2 digit desimal)
+    $de004 = str_pad($nominal, 10, '0', STR_PAD_LEFT) . '00';
+
+    // DE012: HHmm (jam:menit sekarang)
+    $de012 = date('Hi');
+
+    // DE013: ddMM (tanggal:bulan sekarang)
+    $de013 = date('dm');
+
+    // DE037: retrieval reference number 12 digit (nomor unik transaksi)
+    $de037 = date('His') . str_pad((string)mt_rand(1, 999999), 6, '0', STR_PAD_LEFT);
+
+    // DE048: kode transaksi sesuai jenis transfer
+    $de048 = buildDE048($jenisTF);
+
+    // DE052: PIN block (64 zero untuk inquiry)
+    $de052 = str_repeat('0', 64);
+
+    // DE061: SIM Serial / device identifier agen
+    $de061 = DE061_SIM_SERIAL;
+
+    // DE102: nomor rekening tujuan
+    $de102 = $nomorRekening;
+
+    // DE103: kode bank tujuan
+    $de103 = $kodeBank;
+
+    // Bangun struktur ISO 8583-like JSON sesuai MTI=010 (DIGITAL_BANK_INQUIRY)
+    $msg = [
+        'DE003' => '231041',    // processing code inquiry payment
+        'DE004' => $de004,
+        'DE012' => $de012,
+        'DE013' => $de013,
+        'DE037' => $de037,
+        'DE044' => '0',
+        'DE048' => $de048,
+        'DE052' => $de052,
+        'DE061' => $de061,
+        'DE102' => $de102,
+        'DE103' => $de103,
+    ];
+
+    $isoRequest = [
+        'MTI' => '010',         // DIGITAL_BANK_INQUIRY
+        'MSG' => $msg,
+    ];
+
+    return $isoRequest;
+}
+
+/**
+ * Kirim request inquiry ke digital.sis1.net
+ *
+ * Sesuai source code (mbanking.controller.php):
+ *   $cM  = "cCode=" . $cB;  ← body form-urlencoded
+ *   $cU  = GetConfig('s')   ← URL digital server
+ *   $vaH = array(
+ *     'authorization: ' . hash('sha256', $cM . SNow()),
+ *     'identity: '      . GetConfig('cicd'),
+ *     'datetime: '      . SNow(),
+ *     'Content-Type: application/x-www-form-urlencoded'
+ *   );
+ *   SendHTTPPostMB($cU, $cM, '', false, $vaH);
+ *
+ * PENTING: authorization = SHA256(fullBodyString . timestamp)
+ *          bukan SHA256(json . timestamp) — melainkan SHA256("cCode={json}" . timestamp)
+ */
+function sendInquiryRequest(array $isoRequest, string $accessToken): array {
+    $cB  = json_encode($isoRequest, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    $cM  = 'cCode=' . $cB;
+    $cU  = URL_DIGITAL;
+    $dNs = SNow();
+
+    // Authorization = SHA256(body_string . timestamp)
+    $authorization = hash('sha256', $cM . $dNs);
+
+    $headers = [
+        'authorization: ' . $authorization,
+        'identity: '      . CICD,
+        'datetime: '      . $dNs,
+        'Content-Type: application/x-www-form-urlencoded',
+        // Tambah Authorization Bearer sesuai OAuth token
+        'Authorization: Bearer ' . $accessToken,
+    ];
+
+    $result = sendHttpPost($cU, $cM, $headers);
+    $result['iso_request'] = $isoRequest;
+    $result['body_signed'] = $cM;
+    $result['datetime']    = $dNs;
+    $result['sha256_auth'] = $authorization;
+
+    return $result;
+}
+
+/**
+ * ISO2Array — parse response ISO 8583 dari digital server
+ *
+ * Response dari digital server bisa berupa:
+ *   a) JSON wrapper: {"data": "...ISO_JSON_STRING...", "RC": "00", ...}
+ *   b) JSON langsung array ISO: {"MTI":"010","RC":"00","MSG":{...}}
+ *   c) String ISO terenkapsulasi
+ *
+ * Sesuai source:
+ *   $vaResponse = json_decode($cResponse, 1);
+ *   $vaResponse = json_decode($vaResponse["data"], 1);  // unwrap
+ *   $vaResponse = MBankingFunc::ISO2Array($cResponse);  // parse ISO
+ */
+function parseISO8583Response(array $httpResult): array {
+    $raw  = $httpResult['raw'] ?? '';
+    $data = $httpResult['data'] ?? [];
+
+    // Coba unwrap {"data": "..."} jika ada
+    if (!empty($data['data']) && is_string($data['data'])) {
+        $inner = json_decode($data['data'], true);
+        if (is_array($inner)) {
+            $data = $inner;
+        }
+    }
+
+    // Jika response sudah berupa array ISO langsung
+    if (isset($data['MTI'])) {
+        return $data;
+    }
+
+    // Fallback: kembalikan data apa adanya
+    return $data;
+}
+
+/**
+ * Fungsi utama: Inquiry Transfer Bank
+ */
+function inquiryTransferBank(array $params): array {
+    $debug = [];
+
+    // ── Step 1: Ambil Token ────────────────────────────────────
+    $tokenResult = getAccessToken();
+    $debug['step1_get_token'] = $tokenResult;
+
+    if (!$tokenResult['success']) {
+        return [
+            'success' => false,
+            'step'    => 'get_token',
+            'rc'      => 'XT',
+            'message' => 'Gagal mendapatkan token: ' . ($tokenResult['error'] ?? 'Unknown error'),
+            'debug'   => $debug,
+        ];
+    }
+
+    $accessToken = $tokenResult['token'];
+
+    // ── Step 2: Bangun ISO Request ─────────────────────────────
+    $isoRequest = buildISO8583Request($params, $accessToken);
+    $debug['step2_iso_request'] = $isoRequest;
+
+    // ── Step 3: Kirim ke Digital Server ───────────────────────
+    $httpResult = sendInquiryRequest($isoRequest, $accessToken);
+    $debug['step3_http_result'] = $httpResult;
+
+    // ── Step 4: Parse Response ─────────────────────────────────
+    $isoResponse = parseISO8583Response($httpResult);
+    $debug['step4_iso_response'] = $isoResponse;
+
+    // Ambil RC dari response
+    $rc      = $isoResponse['RC']  ?? $isoResponse['rc'] ?? ($httpResult['http_code'] == 200 ? '00' : 'XT');
+    $msgData = $isoResponse['MSG'] ?? $isoResponse;
+
+    // Parsing field-field dari MSG (hasil ISO2Array)
+    // Sesuai source: tagihan (nama rekening), DE004 (biaya admin), DE102 (rekening), dll.
+    $tagihan      = '';
+    $namaRekening = '';
+    $biayaAdmin   = 0;
+
+    if (is_string($msgData)) {
+        // MSG bisa berupa string tagihan langsung
+        $tagihan = $msgData;
+    } elseif (is_array($msgData)) {
+        // Atau array dengan field-field ISO
+        $tagihan      = $msgData['DE048'] ?? $msgData['tagihan'] ?? $msgData['message'] ?? '';
+        $namaRekening = $msgData['DE048'] ?? $msgData['NamaRekening'] ?? '';
+        // DE004 = biaya admin (dalam format "0000000000{nominal}00")
+        $de004Raw     = $msgData['DE004'] ?? '000000000000';
+        $biayaAdmin   = (int)substr($de004Raw, 0, -2); // hapus 2 digit desimal
+        // DE102 = nomor rekening konfirmasi
+        $nomorKonfirm = $msgData['DE102'] ?? $params['nomor_rekening'] ?? '';
+    }
+
+    $success = in_array($rc, ['00', '19'], true);
+
+    // Parse nama pemilik rekening dari tagihan (format Assist: "NamaBank|NamaRekening|..." atau string langsung)
+    $beneficiaryName = '-';
+    $beneficiaryNo   = $params['nomor_rekening'] ?? '';
+    if (!empty($tagihan)) {
+        $parts = explode('|', $tagihan);
+        if (count($parts) >= 2) {
+            $beneficiaryName = $parts[1] ?? '-';
+            $beneficiaryNo   = $parts[0] ?? $beneficiaryNo;
+        } elseif (count($parts) === 1 && strlen($tagihan) > 5) {
+            $beneficiaryName = $tagihan;
+        }
+    }
+
+    return [
+        'success'         => $success,
+        'step'            => 'inquiry',
+        'rc'              => $rc,
+        'message'         => $tagihan ?: ($success ? 'Inquiry berhasil' : 'Inquiry gagal'),
+        'beneficiary'     => [
+            'account_no'   => $beneficiaryNo,
+            'account_name' => $beneficiaryName,
+            'bank_code'    => $params['kode_bank']  ?? '',
+            'bank_name'    => $params['nama_bank']  ?? '',
+        ],
+        'biaya_admin'     => $biayaAdmin,
+        'jenis_transfer'  => strtoupper($params['jenis_transfer'] ?? 'TFDANA'),
+        'de048'           => buildDE048($params['jenis_transfer'] ?? 'TFDANA'),
+        'token_from_cache'=> $tokenResult['from_cache'] ?? false,
+        'debug'           => $debug,
+    ];
+}
+
+// ============================================================
+// HANDLE POST REQUEST
+// ============================================================
+$result       = null;
+$errorMessage = '';
+$formData     = [];
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'inquiry') {
+
+    $formData = [
+        'nomor_rekening' => trim($_POST['nomor_rekening']  ?? ''),
+        'kode_bank'      => trim($_POST['kode_bank']       ?? ''),
+        'kode_bank_manual'=> trim($_POST['kode_bank_manual'] ?? ''),
+        'nama_bank'      => trim($_POST['nama_bank']       ?? ''),
+        'nominal'        => trim($_POST['nominal']         ?? '0'),
+        'jenis_transfer' => strtoupper(trim($_POST['jenis_transfer'] ?? 'TFDANA')),
+    ];
+
+    // Jika input kode bank manual diisi, gunakan itu
+    if (!empty($formData['kode_bank_manual'])) {
+        $formData['kode_bank'] = $formData['kode_bank_manual'];
+    }
+
+    // Validasi input
+    if (empty($formData['nomor_rekening'])) {
+        $errorMessage = 'Nomor rekening tujuan wajib diisi!';
+    } elseif (empty($formData['kode_bank'])) {
+        $errorMessage = 'Kode bank tujuan wajib diisi!';
+    } elseif (KODE_AGEN === '') {
+        $errorMessage = '⚠️ KODE_AGEN belum dikonfigurasi! Harap isi konstanta KODE_AGEN di bagian konfigurasi script.';
+    } elseif (OAUTH_CLIENT_ID === '' && OAUTH_USERNAME === '') {
+        $errorMessage = '⚠️ Kredensial OAuth belum dikonfigurasi! Harap isi OAUTH_CLIENT_ID / OAUTH_USERNAME di bagian konfigurasi.';
+    } else {
+        $result = inquiryTransferBank($formData);
+    }
+}
+
+// ============================================================
+// DATA REFERENSI
+// ============================================================
+$daftarBank = [
+    ''       => '-- Pilih Bank --',
+    '008'    => 'Bank Mandiri',
+    '009'    => 'BNI',
+    '002'    => 'BRI',
+    '014'    => 'BCA',
+    '013'    => 'Bank Permata',
+    '022'    => 'CIMB Niaga',
+    '016'    => 'Maybank',
+    '011'    => 'Danamon',
+    '028'    => 'OCBC NISP',
+    '200'    => 'BTN',
+    '019'    => 'Panin Bank',
+    '023'    => 'UOB',
+    '076'    => 'BPD Bali',
+    '110'    => 'BJB',
+    '111'    => 'Bank DKI',
+    '112'    => 'BPD Jateng',
+    '113'    => 'BPD DIY',
+    '114'    => 'BPD Jatim',
+    '116'    => 'BPD Sumut',
+    '118'    => 'BPD Sulsel',
+    '119'    => 'BPD NTB',
+    '120'    => 'BPD Kalbar',
+    '121'    => 'BPD Kalteng',
+    '122'    => 'BPD Kalsel',
+    '123'    => 'BPD Kaltim',
+    '131'    => 'BPD Sulut',
+    '132'    => 'BPD Sulteng',
+    '133'    => 'BPD Sultra',
+    '335'    => 'BNC (Neo Commerce)',
+    '422'    => 'BSI',
+    '503'    => 'Bank Jago',
+    '506'    => 'SeaBank',
+    '513'    => 'Bank Ina',
+    '553'    => 'Bank DBS',
+    '688'    => 'HSBC Indonesia',
+];
+
+// Cek apakah konfigurasi lengkap
+$isConfigured = (KODE_AGEN !== '' && OAUTH_CLIENT_ID !== '' && DE061_SIM_SERIAL !== '');
+?>
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Inquiry Transfer Bank — SIS/Assist Middleware</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #003d82 0%, #006eff 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        .container { max-width: 960px; margin: 0 auto; }
+
+        /* ── Header ── */
+        .page-header { text-align: center; color: #fff; margin-bottom: 24px; }
+        .header-badge {
+            display: inline-flex; align-items: center; gap: 10px;
+            background: rgba(255,255,255,.13);
+            backdrop-filter: blur(6px);
+            border: 1px solid rgba(255,255,255,.2);
+            border-radius: 50px;
+            padding: 9px 22px;
+            margin-bottom: 12px;
+        }
+        .badge-permata {
+            background: #003d82; color: #fff;
+            border-radius: 8px; padding: 3px 9px;
+            font-size: .72rem; font-weight: 800; letter-spacing: 1px;
+        }
+        .badge-assist {
+            background: #f59e0b; color: #1c1917;
+            border-radius: 8px; padding: 3px 9px;
+            font-size: .72rem; font-weight: 800; letter-spacing: 1px;
+        }
+        .badge-sep { color: rgba(255,255,255,.5); }
+        .page-header h1 { font-size: 1.85rem; font-weight: 800; }
+        .page-header p  { font-size: .93rem; opacity: .82; margin-top: 5px; }
+
+        /* ── Cards ── */
+        .card {
+            background: #fff;
+            border-radius: 16px;
+            box-shadow: 0 8px 36px rgba(0,0,0,.18);
+            overflow: hidden;
+            margin-bottom: 20px;
+        }
+        .card-header {
+            background: linear-gradient(90deg, #003d82, #0057c2);
+            color: #fff;
+            padding: 15px 22px;
+            display: flex; align-items: center; gap: 10px;
+            font-size: .97rem; font-weight: 700;
+        }
+        .card-header .ch-icon {
+            width: 30px; height: 30px;
+            background: rgba(255,255,255,.2);
+            border-radius: 7px;
+            display: flex; align-items: center; justify-content: center;
+            font-size: 17px;
+        }
+        .card-header .ch-badge {
+            margin-left: auto;
+            background: rgba(255,255,255,.18);
+            border-radius: 6px;
+            padding: 2px 9px;
+            font-size: .72rem;
+            letter-spacing: .4px;
+        }
+        .card-body { padding: 24px; }
+
+        /* ── Config Info ── */
+        .config-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 10px;
+            margin-bottom: 18px;
+        }
+        @media (max-width: 640px) { .config-grid { grid-template-columns: 1fr 1fr; } }
+        .cfg-item {
+            background: #f8fafc;
+            border: 1px solid #e2e8f0;
+            border-radius: 10px;
+            padding: 10px 12px;
+        }
+        .cfg-item .cfg-label { font-size: .72rem; font-weight: 700; color: #64748b; text-transform: uppercase; letter-spacing: .5px; }
+        .cfg-item .cfg-value { font-size: .88rem; font-weight: 600; color: #1e293b; margin-top: 3px; font-family: monospace; }
+        .cfg-item .cfg-value.ok   { color: #059669; }
+        .cfg-item .cfg-value.warn { color: #d97706; }
+        .cfg-item .cfg-value.err  { color: #dc2626; }
+
+        /* ── Alert ── */
+        .alert {
+            border-radius: 10px; padding: 13px 17px;
+            margin-bottom: 16px; font-size: .9rem;
+            display: flex; align-items: flex-start; gap: 10px;
+        }
+        .alert-error   { background: #fef2f2; border: 1px solid #fca5a5; color: #7f1d1d; }
+        .alert-warning { background: #fffbeb; border: 1px solid #fcd34d; color: #78350f; }
+        .alert-info    { background: #eff6ff; border: 1px solid #93c5fd; color: #1e3a8a; }
+        .alert .al-ic  { font-size: 17px; flex-shrink: 0; }
+
+        /* ── Form ── */
+        .section-title {
+            font-size: .75rem; font-weight: 700; color: #64748b;
+            text-transform: uppercase; letter-spacing: 1px;
+            display: flex; align-items: center; gap: 8px;
+            margin: 18px 0 12px;
+        }
+        .section-title::after { content: ''; flex: 1; height: 1px; background: #e2e8f0; }
+        .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+        @media (max-width: 580px) { .form-grid { grid-template-columns: 1fr; } }
+        .form-group { display: flex; flex-direction: column; gap: 5px; }
+        .form-group.full { grid-column: 1 / -1; }
+        .form-group label {
+            font-size: .82rem; font-weight: 700; color: #374151;
+            text-transform: uppercase; letter-spacing: .4px;
+        }
+        .form-group label .req { color: #ef4444; }
+        .form-group label .opt { color: #9ca3af; font-weight: 400; font-size: .77rem; text-transform: none; }
+        .form-group input,
+        .form-group select {
+            border: 1.5px solid #d1d5db;
+            border-radius: 8px;
+            padding: 9px 13px;
+            font-size: .92rem;
+            color: #111827;
+            outline: none;
+            transition: border-color .2s, box-shadow .2s;
+        }
+        .form-group input:focus,
+        .form-group select:focus {
+            border-color: #3b82f6;
+            box-shadow: 0 0 0 3px rgba(59,130,246,.13);
+        }
+        .field-hint { font-size: .75rem; color: #6b7280; }
+
+        /* ── Transfer Type Tabs ── */
+        .type-tabs { display: flex; gap: 10px; flex-wrap: wrap; }
+        .type-tab {
+            flex: 1; min-width: 90px;
+            padding: 10px 8px;
+            border: 2px solid #e5e7eb;
+            border-radius: 10px;
+            text-align: center;
+            cursor: pointer;
+            background: #f9fafb;
+            transition: all .2s;
+        }
+        .type-tab input[type=radio] { display: none; }
+        .type-tab .ti  { font-size: 20px; display: block; }
+        .type-tab .tl  { font-size: .78rem; font-weight: 700; color: #374151; display: block; }
+        .type-tab .td  { font-size: .69rem; color: #6b7280; display: block; }
+        .type-tab .tde048 { font-size: .65rem; color: #9ca3af; display: block; font-family: monospace; }
+        .type-tab:has(input:checked), .type-tab.active {
+            border-color: #2563eb; background: #eff6ff;
+        }
+        .type-tab:has(input:checked) .tl, .type-tab.active .tl { color: #1d4ed8; }
+
+        /* ── Submit Button ── */
+        .btn-submit {
+            width: 100%; padding: 13px;
+            background: linear-gradient(135deg, #1d4ed8, #2563eb);
+            color: #fff; border: none; border-radius: 10px;
+            font-size: .97rem; font-weight: 700; cursor: pointer;
+            transition: box-shadow .2s; margin-top: 6px;
+            display: flex; align-items: center; justify-content: center; gap: 8px;
+        }
+        .btn-submit:hover { box-shadow: 0 4px 20px rgba(29,78,216,.4); }
+        .btn-submit:disabled { opacity: .65; cursor: not-allowed; }
+
+        /* ── Result ── */
+        .result-wrap { margin-top: 20px; }
+        .result-header {
+            border-radius: 12px 12px 0 0; padding: 14px 20px;
+            display: flex; align-items: center; gap: 10px;
+            font-weight: 800; color: #fff;
+        }
+        .result-header.ok   { background: linear-gradient(90deg, #047857, #10b981); }
+        .result-header.fail { background: linear-gradient(90deg, #b91c1c, #dc2626); }
+        .result-body {
+            background: #fff; border: 1px solid #e5e7eb;
+            border-top: none; border-radius: 0 0 12px 12px; padding: 22px;
+        }
+        .result-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+        @media (max-width: 600px) { .result-grid { grid-template-columns: 1fr 1fr; } }
+        .ri label {
+            font-size: .71rem; font-weight: 700; color: #6b7280;
+            text-transform: uppercase; letter-spacing: .5px; display: block;
+        }
+        .ri .val { font-size: .95rem; font-weight: 600; color: #111827; margin-top: 3px; word-break: break-all; }
+        .ri .val.hl { color: #059669; font-size: 1.08rem; }
+        .ri .val.code { font-family: monospace; font-size: .82rem; }
+        .section-sep { grid-column: 1 / -1; border: none; border-top: 1px dashed #e5e7eb; }
+
+        /* ── Debug ── */
+        .debug-wrap { margin-top: 14px; }
+        .debug-btn {
+            width: 100%; background: #f1f5f9; border: 1px solid #cbd5e1;
+            border-radius: 8px; padding: 9px 14px;
+            font-size: .83rem; font-weight: 600; color: #475569;
+            cursor: pointer; text-align: left;
+            display: flex; justify-content: space-between;
+        }
+        .debug-content {
+            display: none; background: #0f172a; color: #94a3b8;
+            padding: 16px; border-radius: 0 0 8px 8px;
+            font-family: monospace; font-size: .76rem;
+            white-space: pre-wrap; word-break: break-all;
+            max-height: 520px; overflow-y: auto;
+        }
+        .debug-content.show { display: block; }
+        .dc { color: #38bdf8; }
+
+        /* ── Spinner ── */
+        .spinner {
+            display: none; width: 18px; height: 18px;
+            border: 3px solid rgba(255,255,255,.3);
+            border-top-color: #fff; border-radius: 50%;
+            animation: spin .7s linear infinite;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        /* ── Footer ── */
+        .footer { text-align: center; color: rgba(255,255,255,.55); font-size: .8rem; padding: 18px 0 8px; }
+    </style>
+</head>
+<body>
+<div class="container">
+
+    <!-- ── Header ── -->
+    <div class="page-header">
+        <div class="header-badge">
+            <span class="badge-permata">PERMATA</span>
+            <span class="badge-sep">via</span>
+            <span class="badge-assist">ASSIST</span>
+            <span style="color:rgba(255,255,255,.65); font-size:.82rem;">Switching v3 Pro</span>
+        </div>
+        <h1>🏦 Inquiry Transfer Bank</h1>
+        <p>Cek rekening tujuan via SIS/Assist Digital Switching Middleware (MTI=010, INQTFDANA / INQLLG / INQRTGS)</p>
+    </div>
+
+    <!-- ── Config Status ── -->
+    <div class="card">
+        <div class="card-header">
+            <div class="ch-icon">⚙️</div>
+            Status Konfigurasi Middleware
+            <span class="ch-badge"><?= $isConfigured ? '✅ Siap' : '⚠️ Belum Lengkap' ?></span>
+        </div>
+        <div class="card-body" style="padding:18px 24px;">
+            <div class="config-grid">
+                <div class="cfg-item">
+                    <div class="cfg-label">Token URL</div>
+                    <div class="cfg-value ok">myassist.sis1.net</div>
+                </div>
+                <div class="cfg-item">
+                    <div class="cfg-label">Digital Server</div>
+                    <div class="cfg-value ok">digital.sis1.net/dgl</div>
+                </div>
+                <div class="cfg-item">
+                    <div class="cfg-label">mftfi</div>
+                    <div class="cfg-value ok"><?= htmlspecialchars(MFTFI) ?></div>
+                </div>
+                <div class="cfg-item">
+                    <div class="cfg-label">Kode Agen</div>
+                    <div class="cfg-value <?= KODE_AGEN !== '' ? 'ok' : 'err' ?>">
+                        <?= KODE_AGEN !== '' ? htmlspecialchars(KODE_AGEN) : '⚠ Belum diisi' ?>
+                    </div>
+                </div>
+                <div class="cfg-item">
+                    <div class="cfg-label">OAuth Client</div>
+                    <div class="cfg-value <?= OAUTH_CLIENT_ID !== '' ? 'ok' : 'warn' ?>">
+                        <?= OAUTH_CLIENT_ID !== '' ? '✓ Terisi' : '— Belum diisi' ?>
+                    </div>
+                </div>
+                <div class="cfg-item">
+                    <div class="cfg-label">cicd Identity</div>
+                    <div class="cfg-value ok" style="font-size:.68rem;"><?= substr(CICD, 0, 16) ?>…</div>
+                </div>
+                <div class="cfg-item">
+                    <div class="cfg-label">DE061 / SIMSerial</div>
+                    <div class="cfg-value <?= DE061_SIM_SERIAL !== '' ? 'ok' : 'warn' ?>">
+                        <?= DE061_SIM_SERIAL !== '' ? '✓ Terisi' : '— Belum diisi' ?>
+                    </div>
+                </div>
+                <div class="cfg-item">
+                    <div class="cfg-label">Cache File</div>
+                    <div class="cfg-value <?= file_exists(CACHE_FILE_TF) ? 'ok' : 'warn' ?>" style="font-size:.7rem;">
+                        <?= file_exists(CACHE_FILE_TF) ? '✓ Ada' : '— Belum ada' ?>
+                    </div>
+                </div>
+                <div class="cfg-item">
+                    <div class="cfg-label">Signing Method</div>
+                    <div class="cfg-value ok">SHA256(body+time)</div>
+                </div>
+            </div>
+
+            <?php if (!$isConfigured): ?>
+            <div class="alert alert-warning" style="margin-bottom:0;">
+                <span class="al-ic">⚠️</span>
+                <div>
+                    <strong>Konfigurasi belum lengkap.</strong> Edit konstanta di bagian atas script:
+                    <code style="background:#fef3c7;padding:1px 5px;border-radius:3px;">KODE_AGEN</code>,
+                    <code style="background:#fef3c7;padding:1px 5px;border-radius:3px;">OAUTH_CLIENT_ID</code>,
+                    <code style="background:#fef3c7;padding:1px 5px;border-radius:3px;">OAUTH_USERNAME</code>,
+                    <code style="background:#fef3c7;padding:1px 5px;border-radius:3px;">OAUTH_PASSWORD</code>,
+                    <code style="background:#fef3c7;padding:1px 5px;border-radius:3px;">DE061_SIM_SERIAL</code>.
+                    Dapatkan dari administrator SIS/Assist.
+                </div>
+            </div>
+            <?php endif; ?>
+        </div>
+    </div>
+
+    <!-- ── Form Card ── -->
+    <div class="card">
+        <div class="card-header">
+            <div class="ch-icon">🔍</div>
+            Form Inquiry Transfer Bank
+            <span class="ch-badge">ISO 8583 MTI=010</span>
+        </div>
+        <div class="card-body">
+
+            <?php if ($errorMessage): ?>
+            <div class="alert alert-error">
+                <span class="al-ic">❌</span>
+                <div><?= htmlspecialchars($errorMessage) ?></div>
+            </div>
+            <?php endif; ?>
+
+            <div class="alert alert-info" style="margin-bottom:16px;">
+                <span class="al-ic">ℹ️</span>
+                <div>
+                    Request dikirim ke <strong>digital.sis1.net</strong> menggunakan format ISO 8583 (MTI=010).
+                    Header: <code>authorization=SHA256(body+timestamp)</code>, <code>identity=cicd</code>.
+                    DE048 berisi kode transaksi Assist (<code>INQTFDANA</code> / <code>INQLLG</code> / <code>INQRTGS</code>).
+                </div>
+            </div>
+
+            <form method="POST" id="inquiryForm" onsubmit="handleSubmit(event)">
+                <input type="hidden" name="action" value="inquiry">
+
+                <!-- Jenis Transfer -->
+                <div class="section-title">Jenis Transfer</div>
+                <div class="form-group full" style="margin-bottom:16px;">
+                    <div class="type-tabs">
+                        <label class="type-tab <?= ($formData['jenis_transfer'] ?? 'TFDANA') === 'TFDANA' ? 'active' : '' ?>">
+                            <input type="radio" name="jenis_transfer" value="TFDANA"
+                                <?= ($formData['jenis_transfer'] ?? 'TFDANA') === 'TFDANA' ? 'checked' : '' ?>>
+                            <span class="ti">💸</span>
+                            <span class="tl">Transfer Dana</span>
+                            <span class="td">Online / SKN Real-Time</span>
+                            <span class="tde048">DE048: INQTFDANA</span>
+                        </label>
+                        <label class="type-tab <?= ($formData['jenis_transfer'] ?? '') === 'LLG' ? 'active' : '' ?>">
+                            <input type="radio" name="jenis_transfer" value="LLG"
+                                <?= ($formData['jenis_transfer'] ?? '') === 'LLG' ? 'checked' : '' ?>>
+                            <span class="ti">📋</span>
+                            <span class="tl">LLG / SKN Batch</span>
+                            <span class="td">Maks. Rp 500 juta</span>
+                            <span class="tde048">DE048: INQLLG</span>
+                        </label>
+                        <label class="type-tab <?= ($formData['jenis_transfer'] ?? '') === 'RTGS' ? 'active' : '' ?>">
+                            <input type="radio" name="jenis_transfer" value="RTGS"
+                                <?= ($formData['jenis_transfer'] ?? '') === 'RTGS' ? 'checked' : '' ?>>
+                            <span class="ti">🏛️</span>
+                            <span class="tl">RTGS</span>
+                            <span class="td">Di atas Rp 100 juta</span>
+                            <span class="tde048">DE048: INQRTGS</span>
+                        </label>
+                    </div>
+                </div>
+
+                <!-- Bank & Rekening Tujuan -->
+                <div class="section-title">Rekening Tujuan</div>
+                <div class="form-grid">
+                    <div class="form-group">
+                        <label>Bank Tujuan <span class="req">*</span></label>
+                        <select name="kode_bank" id="kodeBank" onchange="setNamaBank(this)">
+                            <?php foreach ($daftarBank as $kode => $nama): ?>
+                            <option value="<?= htmlspecialchars($kode) ?>"
+                                <?= ($formData['kode_bank'] ?? '') === $kode ? 'selected' : '' ?>>
+                                <?= htmlspecialchars($nama) ?>
+                            </option>
+                            <?php endforeach; ?>
+                        </select>
+                        <div class="field-hint">Diisi ke DE103 dalam request ISO</div>
+                    </div>
+
+                    <div class="form-group">
+                        <label>Kode Bank Manual <span class="opt">(jika tidak ada di list)</span></label>
+                        <input type="text" name="kode_bank_manual" id="kodeBankManual"
+                            placeholder="Contoh: 014"
+                            value="<?= htmlspecialchars($formData['kode_bank_manual'] ?? '') ?>">
+                    </div>
+
+                    <input type="hidden" name="nama_bank" id="namaBank"
+                        value="<?= htmlspecialchars($formData['nama_bank'] ?? '') ?>">
+
+                    <div class="form-group">
+                        <label>Nomor Rekening Tujuan <span class="req">*</span></label>
+                        <input type="text" name="nomor_rekening" id="nomorRek"
+                            placeholder="Contoh: 1234567890"
+                            maxlength="28"
+                            value="<?= htmlspecialchars($formData['nomor_rekening'] ?? '') ?>"
+                            oninput="this.value=this.value.replace(/\D/g,'')">
+                        <div class="field-hint">Diisi ke DE102 dalam request ISO</div>
+                    </div>
+
+                    <div class="form-group">
+                        <label>Nominal Transfer (Rp) <span class="opt">(opsional)</span></label>
+                        <input type="text" name="nominal" id="nominalInput"
+                            placeholder="Contoh: 100000"
+                            value="<?= htmlspecialchars($formData['nominal'] ?? '') ?>"
+                            oninput="this.value=this.value.replace(/\D/g,'')">
+                        <div class="field-hint">Diisi ke DE004 dalam request ISO</div>
+                    </div>
+                </div>
+
+                <hr style="margin:20px 0;border:none;border-top:1px dashed #e5e7eb;">
+
+                <button type="submit" class="btn-submit" id="submitBtn">
+                    <span id="btnText">🔍 Kirim Inquiry Transfer</span>
+                    <div class="spinner" id="spinner"></div>
+                </button>
+            </form>
+        </div>
+    </div>
+
+    <!-- ── RESULT ── -->
+    <?php if ($result !== null): ?>
+    <div class="result-wrap">
+
+        <div class="result-header <?= $result['success'] ? 'ok' : 'fail' ?>">
+            <?= $result['success'] ? '✅ Inquiry Berhasil' : '❌ Inquiry Gagal' ?>
+            <span style="margin-left:auto;background:rgba(255,255,255,.2);border-radius:6px;padding:2px 10px;font-size:.78rem;">
+                RC: <?= htmlspecialchars($result['rc'] ?? '-') ?>
+            </span>
+        </div>
+        <div class="result-body">
+
+            <?php if ($result['success']): ?>
+            <div class="result-grid">
+                <div class="ri">
+                    <label>Nama Pemilik Rekening</label>
+                    <div class="val hl"><?= htmlspecialchars($result['beneficiary']['account_name'] ?? '-') ?></div>
+                </div>
+                <div class="ri">
+                    <label>Nomor Rekening</label>
+                    <div class="val"><?= htmlspecialchars($result['beneficiary']['account_no'] ?? '-') ?></div>
+                </div>
+                <div class="ri">
+                    <label>Bank Tujuan</label>
+                    <div class="val">
+                        [<?= htmlspecialchars($result['beneficiary']['bank_code'] ?? '-') ?>]
+                        <?= htmlspecialchars($result['beneficiary']['bank_name'] ?? '-') ?>
+                    </div>
+                </div>
+                <hr class="section-sep">
+                <div class="ri">
+                    <label>Jenis Transfer</label>
+                    <div class="val"><?= htmlspecialchars($result['jenis_transfer'] ?? '-') ?></div>
+                </div>
+                <div class="ri">
+                    <label>Biaya Admin</label>
+                    <div class="val">Rp <?= number_format($result['biaya_admin'] ?? 0, 0, ',', '.') ?></div>
+                </div>
+                <div class="ri">
+                    <label>DE048</label>
+                    <div class="val code"><?= htmlspecialchars($result['de048'] ?? '-') ?></div>
+                </div>
+                <hr class="section-sep">
+                <div class="ri">
+                    <label>Response Code</label>
+                    <div class="val code"><?= htmlspecialchars($result['rc'] ?? '-') ?></div>
+                </div>
+                <div class="ri" style="grid-column:1/-1">
+                    <label>Pesan / Tagihan</label>
+                    <div class="val"><?= htmlspecialchars($result['message'] ?? '-') ?></div>
+                </div>
+            </div>
+            <div style="margin-top:14px;padding:12px;background:#f0fdf4;border:1px solid #86efac;border-radius:8px;font-size:.84rem;color:#065f46;">
+                ✅ Rekening valid! Transfer dapat dilanjutkan ke
+                <strong><?= htmlspecialchars($result['beneficiary']['account_name'] ?? '-') ?></strong>
+                (<?= htmlspecialchars($result['beneficiary']['account_no'] ?? '-') ?>)
+                di <?= htmlspecialchars($result['beneficiary']['bank_name'] ?? '-') ?>.
+                <?php if ($result['token_from_cache'] ?? false): ?>
+                <em style="font-size:.78rem;">(Token dari cache)</em>
+                <?php endif; ?>
+            </div>
+
+            <?php else: ?>
+            <div class="alert alert-error">
+                <span class="al-ic">🚫</span>
+                <div>
+                    <strong>Step:</strong> <?= htmlspecialchars($result['step'] ?? '-') ?><br>
+                    <strong>RC:</strong> <?= htmlspecialchars($result['rc'] ?? '-') ?><br>
+                    <strong>Pesan:</strong> <?= htmlspecialchars($result['message'] ?? '-') ?>
+                </div>
+            </div>
+            <?php endif; ?>
+
+            <!-- ── Debug Panel ── -->
+            <?php if (DEBUG_MODE): ?>
+            <div class="debug-wrap">
+                <button class="debug-btn" onclick="toggleDebug('dbg1')">
+                    🔧 Debug: Request / Response ISO 8583 (SHA256 Signing)
+                    <span id="dbg1-icon">▼</span>
+                </button>
+                <div class="debug-content" id="dbg1">
+<span class="dc">━━ STEP 1: GET TOKEN ━━</span>
+Token URL : <?= htmlspecialchars(URL_GET_TOKEN) ?>
+
+Dari Cache: <?= ($result['debug']['step1_get_token']['from_cache'] ?? false) ? 'YA' : 'TIDAK' ?>
+
+Sukses    : <?= ($result['debug']['step1_get_token']['success'] ?? false) ? 'YA' : 'TIDAK' ?>
+
+
+<span class="dc">━━ STEP 2: ISO 8583 REQUEST (MTI=010) ━━</span>
+<?= htmlspecialchars(json_encode($result['debug']['step2_iso_request'] ?? [], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE)) ?>
+
+
+<span class="dc">━━ STEP 3: HTTP POST ke Digital Server ━━</span>
+URL        : <?= htmlspecialchars($result['debug']['step3_http_result']['url'] ?? '') ?>
+
+Body Sent  : <?= htmlspecialchars($result['debug']['step3_http_result']['body_signed'] ?? '') ?>
+
+DateTime   : <?= htmlspecialchars($result['debug']['step3_http_result']['datetime'] ?? '') ?>
+
+SHA256 Auth: <?= htmlspecialchars($result['debug']['step3_http_result']['sha256_auth'] ?? '') ?>
+
+HTTP Code  : <?= htmlspecialchars((string)($result['debug']['step3_http_result']['http_code'] ?? '')) ?>  (<?= $result['debug']['step3_http_result']['elapsed_ms'] ?? 0 ?>ms)
+
+RAW Response:
+<?= htmlspecialchars($result['debug']['step3_http_result']['raw'] ?? '(kosong)') ?>
+
+
+<span class="dc">━━ STEP 4: ISO 8583 RESPONSE PARSED ━━</span>
+<?= htmlspecialchars(json_encode($result['debug']['step4_iso_response'] ?? [], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE)) ?>
+
+                </div>
+            </div>
+            <?php endif; ?>
+        </div>
+
+    </div>
+    <?php endif; ?>
+
+    <div class="footer">
+        Inquiry Transfer Bank — SIS/Assist Switching Middleware v1.6.39 &mdash;
+        PHP <?= PHP_VERSION ?> &mdash; <?= SNow() ?> WIB
+    </div>
+
+</div>
+
+<script>
+const bankNames = <?= json_encode(array_filter($daftarBank, fn($v) => $v !== '-- Pilih Bank --')) ?>;
+
+function setNamaBank(sel) {
+    document.getElementById('namaBank').value = bankNames[sel.value] || '';
+    if (sel.value) document.getElementById('kodeBankManual').value = '';
+}
+
+document.getElementById('kodeBankManual').addEventListener('input', function() {
+    if (this.value) {
+        document.getElementById('kodeBank').value = '';
+        document.getElementById('namaBank').value  = '';
+    }
+});
+
+function handleSubmit(e) {
+    const manual = document.getElementById('kodeBankManual').value.trim();
+    if (manual) document.getElementById('kodeBank').value = manual;
+    document.getElementById('btnText').textContent = 'Memproses...';
+    document.getElementById('spinner').style.display = 'block';
+    document.getElementById('submitBtn').disabled = true;
+    return true;
+}
+
+function toggleDebug(id) {
+    const el   = document.getElementById(id);
+    const icon = document.getElementById(id + '-icon');
+    el.classList.toggle('show') ? icon.textContent = '▲' : icon.textContent = '▼';
+}
+
+document.querySelectorAll('.type-tab input[type=radio]').forEach(function(r) {
+    r.addEventListener('change', function() {
+        document.querySelectorAll('.type-tab').forEach(t => t.classList.remove('active'));
+        r.closest('.type-tab').classList.add('active');
+    });
+});
+</script>
+</body>
+</html>

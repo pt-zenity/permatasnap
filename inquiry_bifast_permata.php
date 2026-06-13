@@ -6,7 +6,7 @@
  * Payment) melalui jalur SIS/Assist switching middleware (assist-switching_v3_pro).
  *
  * AUTO-DETECTION dari source code assist-switching_v3_pro & assist-bpr.net:
- *   ✅ URL_GET_TOKEN, URL_DIGITAL, CICD, MFTFI → dari config/local_config.php
+ *   ✅ URL_GET_TOKEN, URL_DIGITAL, MFTFI → dari config/local_config.php
  *   ✅ KODE_AGEN, MFTFI BIFAST → dari nama file storage/cds/cache/*snap_ft_bdi.cache
  *   ✅ OAuth credentials (auto-detect, urutan prioritas):
  *      1. File .assist.env (format KEY=VALUE):
@@ -27,8 +27,8 @@
  *      Cache file: cds-auth-a-{KodeAgen}_{mftfi}-snap_ft_bdi.cache
  *   2. Bangun pesan ISO 8583-like JSON (MTI="010", MSG dengan DE fields)
  *      DE048 berisi kode INQBIFAST (strpos(json_encode($cRequest),"BIFAST") > 0)
- *   3. Kirim POST ke digital.sis1.net/assist-digital.net/public/dgl
- *      Header: authorization=SHA256("cCode={json}".timestamp), identity=cicd
+ *   3. Kirim POST ke switching.mcoll.sis1.net/.../mobile-digital (proxy v3)
+ *      Header: Authorization: Bearer {accessToken}
  *   4. Response di-parse dari ISO 8583 array → MBankingFunc::ISO2Array
  *
  * Referensi: assist-switching_v3_pro v1.6.39 "Assist Pro Net"
@@ -418,16 +418,15 @@ $_myAssistBase  = $_LOCAL_CONFIG['_URL_MY_ASSIST_'] ?? 'http://myassist.sis1.net
 $_urlGetToken   = $_LOCAL_CONFIG['_URL_GET_TOKEN_'] ?? ($_myAssistBase . '/oauth/getaccesstoken');
 $_urlCekToken   = $_LOCAL_CONFIG['_URL_CEK_TOKEN_'] ?? ($_myAssistBase . '/oauth/cekaccesstoken');
 $_urlRfzToken   = $_LOCAL_CONFIG['_URL_RFZ_TOKEN_'] ?? ($_myAssistBase . '/oauth/getaccesstokenfromrefresh');
-$_urlDigital    = $_LOCAL_CONFIG['s']               ?? 'http://digital.sis1.net/assist-digital.net/public/dgl';
-$_urlDigitalSS  = $_LOCAL_CONFIG['ss']              ?? 'http://digital.sis1.net/assist-digital.net/public/rgol';
-$_cicd          = $_LOCAL_CONFIG['cicd']            ?? 'db96e3cba196f76a6c31e4c9625614b3dc57619fba7e29ee534dd20c5c44855d';
+$_swProBase     = $_LOCAL_CONFIG['_URL_SW_PRO_']    ?? 'http://switching.mcoll.sis1.net/assist-switching_v3_pro/public';
+$_urlDigital    = $_LOCAL_CONFIG['s']               ?? ($_swProBase . '/mobile-digital');
+$_urlDigitalSS  = $_LOCAL_CONFIG['ss']              ?? ($_swProBase . '/mobile-digital');
 $_mftfi         = $_CACHE_BF['mftfi']               ?? ($_LOCAL_CONFIG['mftfi'] ?? '002');
 
 $_DETECTION_LOG['assist_root']    = $_ASSIST_ROOT ?: '— tidak ditemukan (fallback ke default)';
 $_DETECTION_LOG['local_config']   = !empty($_LOCAL_CONFIG) ? '✅ Terbaca (' . count($_LOCAL_CONFIG) . ' keys)' : '⚠️ Tidak ditemukan';
 $_DETECTION_LOG['url_get_token']  = empty($_LOCAL_CONFIG['_URL_GET_TOKEN_']) ? '⚠️ fallback default' : '✅ dari local_config.php';
-$_DETECTION_LOG['url_digital']    = empty($_LOCAL_CONFIG['s'])               ? '⚠️ fallback default' : '✅ dari local_config.php';
-$_DETECTION_LOG['cicd']           = empty($_LOCAL_CONFIG['cicd'])            ? '⚠️ fallback default' : '✅ dari local_config.php';
+$_DETECTION_LOG['url_digital']    = empty($_LOCAL_CONFIG['s'])               ? '⚠️ fallback default (switching.mcoll.sis1.net)' : '✅ dari local_config.php';
 
 // ── KODE_AGEN + MFTFI BIFAST (dari cache file snap_ft_bdi) ───
 $_kodeAgen       = $_CACHE_BF['kode_agen'] ?? '';
@@ -506,7 +505,6 @@ define('URL_CEK_TOKEN',  $_urlCekToken);
 define('URL_RFZ_TOKEN',  $_urlRfzToken);
 define('URL_DIGITAL',    $_urlDigital);
 define('URL_DIGITAL_SS', $_urlDigitalSS);
-define('CICD',           $_cicd);
 define('MFTFI',          $_mftfi);
 define('KODE_AGEN',      $_kodeAgen);
 define('OAUTH_CLIENT_ID',      $_oauthClientId);
@@ -547,7 +545,7 @@ define('BIFAST_MAX_AMOUNT', 200000000);
 //          $_ASSIST_BPR_ROOT, dan $_BPR_ENV TIDAK di-unset —
 //          masih dipakai oleh panel Status Auto-Detection di HTML bawah.
 unset($_myAssistBase, $_urlGetToken, $_urlCekToken, $_urlRfzToken,
-      $_urlDigital, $_urlDigitalSS, $_cicd, $_mftfi, $_mftfiFromCache,
+      $_urlDigital, $_urlDigitalSS, $_mftfi, $_mftfiFromCache,
       $_kodeAgen, $_rawKode, $_cacheDir, $_envFile, $_oauthSource,
       $_oauthClientId, $_oauthClientSecret, $_oauthUsername, $_oauthPassword,
       $_oauthCorporateId, $_oauthTokenPrivate, $_oauthSertifikat, $_oauthKodeAplikasi, $_de061, $_RAW_KODE_BF);
@@ -844,39 +842,29 @@ function buildISO8583RequestBIFAST(array $params): array {
 }
 
 /**
- * Kirim request ISO 8583 ke digital.sis1.net
+ * Kirim request ISO 8583 ke assist-switching_v3_pro (/mobile-digital)
  *
- * Signing sesuai source code:
- *   $cB  = json_encode($isoRequest);
- *   $cM  = "cCode=" . $cB;
- *   auth = hash('sha256', $cM . SNow())
+ * Sesuai source code (mbanking.controller.php):
+ *   $_POST['cCode'] = JSON ISO request
+ *   Header: Authorization: Bearer {accessToken}  ← di-forward ke digital.sis1.net
  *
- * PENTING: SHA256 dihitung atas seluruh body string ("cCode=...") + timestamp,
- *          bukan hanya JSON payload saja.
+ * CATATAN: header authorization(SHA256), identity(cicd), datetime adalah header
+ *   INTERNAL antara switching_v3_pro ↔ digital.sis1.net — TIDAK perlu dikirim dari sini.
+ *   Proxy mbanking.controller.php meneruskan Authorization Bearer kita saja.
  */
 function sendBIFASTInquiryRequest(array $isoRequest, string $accessToken): array {
-    $cB  = json_encode($isoRequest, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
-    $cM  = 'cCode=' . $cB;
-    $cU  = URL_DIGITAL;
-    $dNs = SNow();
-
-    // Authorization = SHA256(full_body_string . datetime)
-    // Sesuai: hash('sha256', $cM . SNow())
-    $authorization = hash('sha256', $cM . $dNs);
+    $cB = json_encode($isoRequest, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    $cM = 'cCode=' . $cB;
+    $cU = URL_DIGITAL;
 
     $headers = [
-        'authorization: ' . $authorization,
-        'identity: '      . CICD,
-        'datetime: '      . $dNs,
-        'Content-Type: application/x-www-form-urlencoded',
         'Authorization: Bearer ' . $accessToken,
+        'Content-Type: application/x-www-form-urlencoded',
     ];
 
     $result = sendHttpPost($cU, $cM, $headers);
     $result['iso_request'] = $isoRequest;
     $result['body_signed'] = $cM;
-    $result['datetime']    = $dNs;
-    $result['sha256_auth'] = $authorization;
 
     return $result;
 }
@@ -1454,7 +1442,6 @@ $isConfigured = (KODE_AGEN !== '' && (OAUTH_SERTIFIKAT !== '' || OAUTH_CLIENT_ID
         $localCfgOk    = !empty($_LOCAL_CONFIG);
         $urlTokenOk    = !empty($_LOCAL_CONFIG['_URL_GET_TOKEN_']);
         $urlDigitalOk  = !empty($_LOCAL_CONFIG['s']);
-        $cicdOk        = !empty($_LOCAL_CONFIG['cicd']);
         $kodeAgenOk    = KODE_AGEN !== '';
         $mftfiOk       = !empty($_CACHE_BF['mftfi'] ?? null);
         $cacheFileOk   = file_exists(CACHE_FILE_BIFAST);
@@ -1661,7 +1648,6 @@ $isConfigured = (KODE_AGEN !== '' && (OAUTH_SERTIFIKAT !== '' || OAUTH_CLIENT_ID
             <div class="det-rows">
                 <?php $row('✅', 'URL_GET_TOKEN', URL_GET_TOKEN, 'ok', $urlTokenOk ? 'CONFIG' : 'DEFAULT', $urlTokenOk ? 'ok' : 'info'); ?>
                 <?php $row('✅', 'URL_DIGITAL (BIFAST)', URL_DIGITAL, 'ok', $urlDigitalOk ? 'CONFIG' : 'DEFAULT', $urlDigitalOk ? 'ok' : 'info'); ?>
-                <?php $row($cicdOk ? '✅' : '⚠️', 'CICD Identity', substr(CICD, 0, 20) . '…', 'ok', $cicdOk ? 'CONFIG' : 'DEFAULT', $cicdOk ? 'ok' : 'info'); ?>
             </div>
         </div>
 
@@ -1699,7 +1685,7 @@ $isConfigured = (KODE_AGEN !== '' && (OAUTH_SERTIFIKAT !== '' || OAUTH_CLIENT_ID
             <div class="alert alert-info" style="margin-bottom:16px;">
                 <span class="ai">⚡</span>
                 <div>
-                    Request dikirim ke <strong>digital.sis1.net</strong> via ISO 8583 (MTI=010).
+                    Request dikirim ke <strong>proxy assist-switching_v3_pro</strong> (<code>/mobile-digital</code>) via ISO 8583 (MTI=010).
                     DE048 = <code>INQBIFAST</code> — routing oleh server ke PermataSNAP atau DanamonSNAP
                     sesuai konfigurasi <code>PermataSNAPTF</code> / <code>DanamonSNAPTF</code> agen.
                     Batas nominal: <strong>Rp 200.000.000</strong> per transaksi.
@@ -1934,10 +1920,6 @@ OAuth Raw  : <?= htmlspecialchars($result['debug']['step1_get_token']['raw']['ra
 URL        : <?= htmlspecialchars($result['debug']['step3_http_result']['url'] ?? '') ?>
 
 Body Sent  : <?= htmlspecialchars($result['debug']['step3_http_result']['body_signed'] ?? '') ?>
-
-DateTime   : <?= htmlspecialchars($result['debug']['step3_http_result']['datetime'] ?? '') ?>
-
-SHA256 Auth: <?= htmlspecialchars($result['debug']['step3_http_result']['sha256_auth'] ?? '') ?>
 
 HTTP Code  : <?= htmlspecialchars((string)($result['debug']['step3_http_result']['http_code'] ?? '')) ?>  (<?= $result['debug']['step3_http_result']['elapsed_ms'] ?? 0 ?>ms)
 

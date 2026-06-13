@@ -11,15 +11,16 @@
 2. [File yang Tersedia](#file-yang-tersedia)
 3. [Arsitektur & Alur Transaksi](#arsitektur--alur-transaksi)
 4. [Prasyarat](#prasyarat)
-5. [Cara Konfigurasi](#cara-konfigurasi)
-6. [Cara Penggunaan — inquiry_transfer_permata.php](#cara-penggunaan--inquiry_transfer_permataph)
-7. [Cara Penggunaan — inquiry_bifast_permata.php](#cara-penggunaan--inquiry_bifast_permataph)
-8. [Format Request & Response](#format-request--response)
-9. [Token Cache (CDS Pattern)](#token-cache-cds-pattern)
-10. [Debug Panel](#debug-panel)
-11. [Kode Referensi DE048](#kode-referensi-de048)
-12. [Troubleshooting](#troubleshooting)
-13. [Referensi Source Code](#referensi-source-code)
+5. [Cara Konfigurasi (Auto-Detection)](#cara-konfigurasi-auto-detection)
+6. [Setup `.assist.env`](#setup-assistenv)
+7. [Cara Penggunaan — inquiry_transfer_permata.php](#cara-penggunaan--inquiry_transfer_permataph)
+8. [Cara Penggunaan — inquiry_bifast_permata.php](#cara-penggunaan--inquiry_bifast_permataph)
+9. [Format Request & Response](#format-request--response)
+10. [Token Cache (CDS Pattern)](#token-cache-cds-pattern)
+11. [Debug Panel & Auto-Detection Report](#debug-panel--auto-detection-report)
+12. [Kode Referensi DE048](#kode-referensi-de048)
+13. [Troubleshooting](#troubleshooting)
+14. [Referensi Source Code](#referensi-source-code)
 
 ---
 
@@ -36,20 +37,17 @@ mengimplementasikan komunikasi langsung dengan server **SIS/Assist digital** men
 | **Protokol** | HTTP POST form-urlencoded ke `digital.sis1.net` |
 | **Format Pesan** | ISO 8583-like JSON (`MTI` + `MSG` dengan field `DE003`…`DE103`) |
 | **Token Cache** | File `.cache` pola CDS (mencegah request token berlebihan) |
+| **Konfigurasi** | ⚡ **Auto-detection** dari `assist-switching_v3_pro` source + `.assist.env` |
 
 ---
 
 ## File yang Tersedia
 
 ```
-webapp/
+(letakkan di dalam direktori assist-switching_v3_pro, atau direktori yang sama)
 ├── inquiry_transfer_permata.php   ← Inquiry Transfer Dana (TFDANA/LLG/RTGS)
 ├── inquiry_bifast_permata.php     ← Inquiry BIFAST (Bank Indonesia Fast Payment)
-└── storage/
-    └── cds/
-        └── cache/
-            ├── cds-auth-a-{KodeAgen}_{mftfi}-snap_tf_bank_permata.cache  ← token TF
-            └── cds-auth-a-{KodeAgen}_{mftfi}-snap_ft_bdi.cache           ← token BIFAST
+└── .assist.env                    ← OAuth credentials (wajib dibuat manual, sekali saja)
 ```
 
 ---
@@ -58,6 +56,14 @@ webapp/
 
 ```
 Client Request (HTTP GET/POST)
+        │
+        ▼
+┌───────────────────────────┐
+│  0. Auto-Detection        │  detectAssistRoot() → cari local_config.php
+│     Baca local_config.php │  parseLocalConfig() → URL, cicd, mftfi
+│     Scan cache filename   │  detectFromCacheTF/BIFAST() → KodeAgen, mftfi
+│     Load .assist.env      │  loadAssistEnv() → OAuth credentials
+└───────────────────────────┘
         │
         ▼
 ┌───────────────────────────┐
@@ -103,63 +109,93 @@ Client Request (HTTP GET/POST)
 - **Akses jaringan** ke:
   - `http://myassist.sis1.net` (OAuth token)
   - `http://digital.sis1.net` (Digital server transaksi)
-- **Kredensial OAuth** dari administrator SIS/Assist:
-  - `client_id`, `client_secret`, `username` (UserH2H), `password`
-- **Data Agen**:
-  - `KODE_AGEN` — kode agen terdaftar di SIS (format `A-XXXXXX`)
-  - `DE061_SIM_SERIAL` — SIMSerial/device identifier dari tabel `agen_fitur`
-- **Direktori writable** untuk menyimpan token cache: `storage/cds/cache/`
+- **`assist-switching_v3_pro`** terinstal di server yang sama (untuk auto-detection)
+- **File `.assist.env`** berisi OAuth credentials (dibuat sekali, lihat seksi di bawah)
 
 ---
 
-## Cara Konfigurasi
+## Cara Konfigurasi (Auto-Detection)
 
-Buka file yang ingin digunakan dan edit bagian **KONFIGURASI** di baris atas (sekitar baris 34–71):
+> ✨ **Tidak perlu edit hardcode** — script otomatis mendeteksi konfigurasi dari instalasi Assist.
 
-### 1. OAuth Credentials
+Script menggunakan **Auto-Detection Engine** dengan 4 fungsi:
 
-```php
-define('OAUTH_CLIENT_ID',     'isi_client_id_anda');
-define('OAUTH_CLIENT_SECRET', 'isi_client_secret_anda');
-define('OAUTH_USERNAME',      'username_H2H_agen');
-define('OAUTH_PASSWORD',      'password_H2H_agen');
+### `detectAssistRoot()`
+Berjalan naik direktori (max 6 level) mencari marker:
+- `config/local_config.php`
+- `storage/cds/cache`
+- `sisproject/project.json`
+
+Jika ≥2 marker ditemukan → itu adalah `assist_root`.
+
+### `parseLocalConfig(string $assistRoot)`
+Mem-parsing `config/local_config.php` via regex (tanpa `require`/`eval`):
+```
+$config['key'] = 'value'   →  key => value
+$config['X'] = $config['BASE'] . '/suffix'  →  X => BASE_value/suffix
+```
+Mengekstrak: `_URL_GET_TOKEN_`, `_URL_MY_ASSIST_`, `s` (URL digital), `cicd`, `mftfi`, dll.
+
+### `detectFromCacheTF()` / `detectFromCacheBIFAST()`
+Scan file di `storage/cds/cache/`:
+```
+cds-auth-a-000268_0017-snap_tf_bank_permata.cache
+              ^^^^^^  ^^^^
+              KodeAgen mftfi  →  KODE_AGEN=A-000268, MFTFI=0017
+```
+File terbaru (filemtime) digunakan jika ada lebih dari satu.
+
+### `loadAssistEnv()`
+Mencari `.assist.env` di direktori saat ini dan 2 level di atasnya.
+Format: `KEY=value` per baris.
+
+### Nilai yang Terdeteksi Otomatis
+
+| Konstanta | Sumber | Keterangan |
+|-----------|--------|------------|
+| `URL_GET_TOKEN` | `local_config.php` → `_URL_GET_TOKEN_` | URL OAuth token |
+| `URL_DIGITAL` | `local_config.php` → `s` | URL digital server |
+| `CICD` | `local_config.php` → `cicd` | Identity hash header |
+| `MFTFI` | Nama file cache | Kode mitra transfer |
+| `KODE_AGEN` | Nama file cache | `A-000268` format |
+| `CACHE_DIR` | `assist_root/storage/cds/cache` | Direktori token cache |
+| `OAUTH_*` | `.assist.env` | Credentials OAuth |
+| `DE061_SIM_SERIAL` | `.assist.env` | SIM serial agen |
+
+---
+
+## Setup `.assist.env`
+
+> 🔑 **Satu-satunya yang perlu disiapkan manual** — credentials OAuth yang ada di database SIS.
+
+Buat file `.assist.env` di direktori yang sama dengan script PHP (atau 1–2 level di atasnya):
+
+```env
+# OAuth Credentials untuk SIS/Assist Switching Middleware
+# Minta dari administrator SIS/Assist saat onboarding agen
+
+OAUTH_CLIENT_ID=isi_client_id_anda
+OAUTH_CLIENT_SECRET=isi_client_secret_anda
+OAUTH_USERNAME=username_H2H_agen
+OAUTH_PASSWORD=password_H2H_agen
+DE061_SIM_SERIAL=nomor_sim_serial_agen
 ```
 
-> ℹ️ Credential ini diperoleh dari **administrator SIS/Assist** saat onboarding agen.
+**Lokasi yang dicari script (urutan prioritas):**
+1. `{direktori_script}/.assist.env`
+2. `{direktori_script}/../.assist.env`
+3. `{direktori_script}/../../.assist.env`
+4. `{direktori_script}/assist.env` (tanpa titik)
 
-### 2. Kode Agen
+**Cara mendapatkan nilai:**
 
-```php
-define('KODE_AGEN', 'A-000268');   // ganti dengan kode agen Anda
-```
-
-Format: `A-` diikuti 6 digit angka. Contoh: `A-000268`, `A-000300`.
-
-### 3. DE061 SIM Serial
-
-```php
-define('DE061_SIM_SERIAL', '002680001234567');  // contoh
-```
-
-Nilai ini diambil dari kolom `SIMSerial` di tabel `agen_fitur` database SIS.
-Digunakan oleh `MBankingFunc::GetKodeAgenMobile()` untuk resolusi kode agen.
-
-### 4. MFTFI (Kode Mitra Transfer)
-
-```php
-define('MFTFI', '002');   // default "002" sesuai local_config.php
-```
-
-Nilai default adalah `"002"`. Ubah hanya jika agen Anda menggunakan kode mitra berbeda.
-Nilai ini juga menentukan nama file cache token.
-
-### 5. Debug Mode
-
-```php
-define('DEBUG_MODE', true);   // true = tampilkan panel debug, false = sembunyikan
-```
-
-Nonaktifkan (`false`) di environment produksi.
+| Key | Cara Mendapatkan |
+|-----|-----------------|
+| `OAUTH_CLIENT_ID` | Administrator SIS/Assist saat onboarding |
+| `OAUTH_CLIENT_SECRET` | Administrator SIS/Assist saat onboarding |
+| `OAUTH_USERNAME` | Kolom `UserH2H` di tabel `agen` database SIS |
+| `OAUTH_PASSWORD` | Password H2H dari administrator |
+| `DE061_SIM_SERIAL` | Kolom `SIMSerial` di tabel `agen_fitur` database SIS |
 
 ---
 
@@ -167,13 +203,11 @@ Nonaktifkan (`false`) di environment produksi.
 
 ### Fungsi
 Melakukan inquiry rekening tujuan untuk transfer dana antar bank melalui:
-- **TFDANA** — Transfer Dana Online (SKN Real-Time / Onlne)
+- **TFDANA** — Transfer Dana Online (SKN Real-Time / Online)
 - **LLG** — Lalu Lintas Giro (SKN Batch, biasanya < Rp 100 juta)
 - **RTGS** — Real-Time Gross Settlement (biasanya > Rp 100 juta)
 
 ### Cara Akses via Browser
-
-Buka di browser dengan parameter GET:
 
 ```
 http://localhost:3000/inquiry_transfer_permata.php
@@ -186,7 +220,7 @@ Tanpa parameter → tampil **form input HTML** interaktif.
 | Parameter | Wajib | Contoh | Keterangan |
 |-----------|-------|--------|------------|
 | `nomor_rekening` | ✅ | `1234567890` | Nomor rekening tujuan |
-| `kode_bank` | ✅ | `014` | Kode bank tujuan (3 digit BCA=014, Mandiri=008, BNI=009, BRI=002) |
+| `kode_bank` | ✅ | `014` | Kode bank tujuan (BCA=014, Mandiri=008, BNI=009, BRI=002) |
 | `jenis_transfer` | ❌ | `TFDANA` | Jenis transfer: `TFDANA` (default), `LLG`, `RTGS` |
 | `nominal` | ❌ | `1000000` | Nominal transfer (Rupiah, angka saja) |
 
@@ -333,7 +367,7 @@ cCode={"MTI":"010","MSG":{"DE003":"231041","DE004":"000001000000","DE012":"1430"
 | Header | Nilai | Keterangan |
 |--------|-------|------------|
 | `authorization` | SHA256(`cCode={json}` + timestamp) | Signing body + waktu |
-| `identity` | `db96e3cb...855d` | CICD hash tetap (dari `local_config.php`) |
+| `identity` | `db96e3cb...855d` | CICD hash (auto-detect dari `local_config.php`) |
 | `datetime` | `2024-06-13 14:30:00` | Timestamp WIB format `Y-m-d H:i:s` (`SNow()`) |
 | `Authorization` | `Bearer {token}` | OAuth token dari myassist.sis1.net |
 
@@ -411,16 +445,18 @@ yang berlebihan** (sesuai pola CDS di `assist-switching_v3_pro`).
 ### Lokasi File Cache
 
 ```
-storage/cds/cache/
+{assist_root}/storage/cds/cache/
 ├── cds-auth-a-{KodeAgen}_{mftfi}-snap_tf_bank_permata.cache   ← Transfer Dana (TF)
 └── cds-auth-a-{KodeAgen}_{mftfi}-snap_ft_bdi.cache            ← BIFAST
 ```
 
-**Contoh nama file nyata** (mengacu sample cache di source code):
+**Contoh nama file nyata:**
 ```
-cds-auth-a-000268_002-snap_tf_bank_permata.cache   (KodeAgen=A-000268, mftfi=002)
-cds-auth-a-000300_002-snap_ft_bdi.cache            (KodeAgen=A-000300, mftfi=002)
+cds-auth-a-000268_0017-snap_tf_bank_permata.cache   (KodeAgen=A-000268, mftfi=0017)
+cds-auth-a-000300_0024-snap_ft_bdi.cache            (KodeAgen=A-000300, mftfi=0024)
 ```
+
+> ℹ️ Nama file ini juga menjadi sumber auto-detection untuk `KODE_AGEN` dan `MFTFI`.
 
 ### Format Isi File Cache
 
@@ -445,53 +481,52 @@ cds-auth-a-000300_002-snap_ft_bdi.cache            (KodeAgen=A-000300, mftfi=002
 
 ```bash
 # Hapus cache TF
-rm storage/cds/cache/cds-auth-a-*-snap_tf_bank_permata.cache
+rm {assist_root}/storage/cds/cache/cds-auth-a-*-snap_tf_bank_permata.cache
 
 # Hapus cache BIFAST
-rm storage/cds/cache/cds-auth-a-*-snap_ft_bdi.cache
-
-# Hapus semua cache
-rm -rf storage/cds/cache/
+rm {assist_root}/storage/cds/cache/cds-auth-a-*-snap_ft_bdi.cache
 ```
 
 ---
 
-## Debug Panel
+## Debug Panel & Auto-Detection Report
 
-Saat `DEBUG_MODE = true`, kedua file menampilkan **4 panel debug** di bawah form:
+Saat `DEBUG_MODE = true` (default), tersedia **2 panel** di halaman:
+
+### 🔍 Auto-Detection Report
+Panel pertama menampilkan hasil deteksi otomatis:
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│ Panel 1: Konfigurasi Aktif                              │
-│   URL Token, URL Digital, KODE_AGEN, MFTFI, CICD,      │
-│   CACHE_FILE, status cache (Ada/Tidak ada)              │
-├─────────────────────────────────────────────────────────┤
-│ Panel 2: OAuth Token Request                            │
-│   URL, status (Cache/Baru), HTTP code, response time,  │
-│   token (tertrunkasi untuk keamanan)                    │
-├─────────────────────────────────────────────────────────┤
-│ Panel 3: Request ke Digital Server                      │
-│   URL, body yang dikirim (cCode=...), headers lengkap,  │
-│   SHA256 hash yang digunakan, timestamp SNow()          │
-├─────────────────────────────────────────────────────────┤
-│ Panel 4: Response dari Digital Server                   │
-│   HTTP code, response time (ms), raw JSON response,    │
-│   hasil parse ISO 8583 (RC, nama nasabah, dll)          │
-└─────────────────────────────────────────────────────────┘
+Auto-Detection Report
+──────────────────────────────────────────────
+assist_root   : /var/www/html/assist-switching_v3_pro  ✅
+local_config  : 10 keys parsed  ✅
+Cache TF      : cds-auth-a-000268_0017-snap_tf_bank_permata.cache
+                → KodeAgen = A-000268, mftfi = 0017  ✅
+.assist.env   : Loaded from /var/www/html/.assist.env
+                → 5 keys (CLIENT_ID, SECRET, USERNAME, PASSWORD, DE061)  ✅
+──────────────────────────────────────────────
+⚠️  Fallback values used (jika ada yang tidak terdeteksi)
 ```
+
+### ⚙️ Konfigurasi Aktif (Config Grid)
+Menampilkan semua nilai yang aktif digunakan:
+
+| Item | Nilai |
+|------|-------|
+| URL Token | `http://myassist.sis1.net/...` |
+| URL Digital | `http://digital.sis1.net/...` |
+| CICD / Identity | `db96e3cb...` |
+| KODE_AGEN | `A-000268` |
+| MFTFI | `0017` |
+| Cache File | `cds-auth-a-000268_0017-snap_tf_bank_permata.cache` |
+| OAuth Credentials | `✅ Loaded from .assist.env` |
 
 ---
 
 ## Kode Referensi DE048
 
 Format: `{part1}*{part2}*{TrxCode}~~{SubCode}`
-
-Parsing di source code (`mbanking.controller.php`):
-```php
-$vaDE048  = split("*", $cRequest['DE048']);  // ["0601","1001","INQTFDANA~~BLTRFAG"]
-$vaTrx    = split("~~", $vaDE048[2]);        // ["INQTFDANA","BLTRFAG"]
-$cKodeMrg = $vaTrx[0];                       // "INQTFDANA"
-```
 
 | TrxCode | SubCode | Part1 | Part2 | Fungsi |
 |---------|---------|-------|-------|--------|
@@ -503,6 +538,37 @@ $cKodeMrg = $vaTrx[0];                       // "INQTFDANA"
 ---
 
 ## Troubleshooting
+
+### ❌ Auto-Detection gagal — assist_root tidak ditemukan
+
+```
+Penyebab : Script tidak diletakkan di dalam atau dekat direktori assist-switching_v3_pro
+Solusi   : Letakkan script PHP di:
+           - Dalam direktori assist-switching_v3_pro/
+           - Atau 1–5 level di atasnya (script naik max 6 level mencari marker)
+           - Contoh: /var/www/html/inquiry_transfer_permata.php
+             jika assist ada di /var/www/html/assist-switching_v3_pro/
+```
+
+### ❌ `.assist.env` tidak ditemukan
+
+```
+Penyebab : File .assist.env belum dibuat atau berada di lokasi yang salah
+Solusi   : Buat file .assist.env di direktori script atau 1–2 level di atasnya
+           Isi dengan OAuth credentials dari administrator SIS
+           (lihat seksi "Setup .assist.env" di atas)
+```
+
+### ❌ KODE_AGEN kosong — file cache belum ada
+
+```
+Penyebab : storage/cds/cache/ kosong (belum pernah ada transaksi)
+Efek     : KODE_AGEN dan MFTFI tidak terdeteksi dari cache
+Solusi   : Set manual di .assist.env:
+           KODE_AGEN=A-000268
+           MFTFI=0017
+           (script akan membaca dari .assist.env sebagai fallback)
+```
 
 ### ❌ cURL Error: Could not resolve host
 
@@ -528,28 +594,12 @@ Solusi   : Cek DE039 dan RC di response untuk kode error spesifik
            Pastikan DE048 sesuai dengan jenis transfer yang diminta
 ```
 
-### ❌ KODE_AGEN kosong → nama cache file salah
-
-```
-Penyebab : KODE_AGEN belum diisi
-Efek     : Cache file tersimpan sebagai cds-auth-a-_002-snap_*.cache (tanpa kode agen)
-Solusi   : Isi KODE_AGEN dengan kode agen yang valid (contoh: 'A-000268')
-```
-
 ### ❌ Permission denied saat menyimpan cache
 
 ```bash
 # Buat direktori cache dan beri permission
 mkdir -p storage/cds/cache
 chmod 755 storage/cds/cache
-```
-
-### ❌ Nominal BIFAST melebihi batas
-
-```
-Penyebab : Nominal > Rp 200.000.000 (BIFAST_MAX_AMOUNT)
-Efek     : Script otomatis memotong ke nilai maksimum
-Solusi   : Gunakan RTGS untuk transfer > Rp 200 juta
 ```
 
 ---
@@ -563,7 +613,7 @@ Script ini diimplementasikan berdasarkan analisis source code:
 | `assist-switching_v3_pro/config/local_config.php` | URL endpoints, cicd hash, mftfi |
 | `assist-switching_v3_pro/mvc/mbanking/mbanking.controller.php` | `ProsesInquiryPayment()`, signing pattern, DE field mapping, BIFAST routing |
 | `assist-switching_v3_pro/include/func.oauth.mod.php` | OAuth token management, CekAccessToken, GetAccessToken |
-| `assist-switching_v3_pro/storage/cds/cache/*.cache` | Pola penamaan file cache CDS |
+| `assist-switching_v3_pro/storage/cds/cache/*.cache` | Pola penamaan file cache CDS → sumber auto-detection KODE_AGEN & MFTFI |
 
 **Versi referensi:** `assist-switching_v3_pro` v1.6.39 "Assist Pro Net"
 
@@ -575,3 +625,4 @@ Script ini diimplementasikan berdasarkan analisis source code:
 - **Platform**: PHP 8.4.21 (kompatibel PHP 8.1+)
 - **Status**: ✅ Active — syntax valid, HTTP 200
 - **Last Updated**: 2026-06-13
+- **Konfigurasi**: ⚡ Auto-detection (tidak perlu edit hardcode)

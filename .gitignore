@@ -1,8 +1,10 @@
-# Exclude everything
+# Exclude everything by default
 /*
+/.*
 
-# But keep these specific files
+# Keep only these 4 files
 !inquiry_transfer_permata.php
 !inquiry_bifast_permata.php
 !.assist.env
+!README.md
 !.gitignore

@@ -1,0 +1,8 @@
+# Exclude everything
+/*
+
+# But keep these specific files
+!inquiry_transfer_permata.php
+!inquiry_bifast_permata.php
+!.assist.env
+!.gitignore

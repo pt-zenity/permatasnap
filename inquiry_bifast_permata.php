@@ -155,23 +155,50 @@ function loadAssistEnv(): array {
 /**
  * Cari direktori root assist-bpr.net secara otomatis.
  * Markers: direktori env/ berisi file *.env + bin/connect.php
- * Pencarian dari __DIR__ ke atas, maks 8 level.
+ *
+ * Urutan pencarian:
+ *   1. Known absolute path: /var/www/prg/app/mvc/assist-bpr.net  (produksi)
+ *   2. Traversal dari __DIR__ ke atas (maks 8 level):
+ *      a. Direktori itu sendiri memiliki env/ + bin/connect.php
+ *      b. Subdirektori bernama assist-bpr.net / assist-bpr / assistbpr
+ *      c. Subdirektori pola app/mvc/assist-bpr.net
  */
 function detectAssistBprRoot(): string {
+    // ── Helper validasi root ──────────────────────────────────
+    $isValidRoot = function (string $candidate): bool {
+        if (!is_dir($candidate . '/env')) return false;
+        if (!file_exists($candidate . '/bin/connect.php')) return false;
+        $envFiles = glob($candidate . '/env/*.env') ?: [];
+        return !empty($envFiles);
+    };
+
+    // ── Langkah 1: known absolute path (produksi) ─────────────
+    $knownPaths = [
+        '/var/www/prg/app/mvc/assist-bpr.net',
+    ];
+    foreach ($knownPaths as $known) {
+        if ($isValidRoot($known)) return $known;
+    }
+
+    // ── Langkah 2: traversal dari __DIR__ ke atas ─────────────
+    $subNames = ['assist-bpr.net', 'assist-bpr', 'assistbpr'];
     $dir = __DIR__;
     for ($i = 0; $i < 8; $i++) {
-        if (is_dir($dir . '/env') && file_exists($dir . '/bin/connect.php')) {
-            $envFiles = glob($dir . '/env/*.env') ?: [];
-            if (!empty($envFiles)) return $dir;
-        }
-        // Cek juga subdirektori bernama assist-bpr.net atau assist-bpr
-        foreach (['assist-bpr.net', 'assist-bpr', 'assistbpr'] as $sub) {
+        // 2a. Direktori saat ini sendiri adalah root assist-bpr.net
+        if ($isValidRoot($dir)) return $dir;
+
+        // 2b. Subdirektori langsung bernama assist-bpr.net / assist-bpr / assistbpr
+        foreach ($subNames as $sub) {
             $candidate = $dir . '/' . $sub;
-            if (is_dir($candidate . '/env') && file_exists($candidate . '/bin/connect.php')) {
-                $envFiles = glob($candidate . '/env/*.env') ?: [];
-                if (!empty($envFiles)) return $candidate;
-            }
+            if ($isValidRoot($candidate)) return $candidate;
         }
+
+        // 2c. Subdirektori app/mvc/assist-bpr.net (struktur /var/www/prg/...)
+        foreach ($subNames as $sub) {
+            $candidate = $dir . '/app/mvc/' . $sub;
+            if ($isValidRoot($candidate)) return $candidate;
+        }
+
         $parent = dirname($dir);
         if ($parent === $dir) break;
         $dir = $parent;

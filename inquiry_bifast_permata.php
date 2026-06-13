@@ -482,8 +482,11 @@ $_envFile = !empty($_oauthSource) && str_contains($_oauthSource, 'bpr')
 $_DETECTION_LOG['assist_bpr_root']      = !empty($_ASSIST_BPR_ROOT)     ? '✅ ' . $_ASSIST_BPR_ROOT      : '— tidak ditemukan';
 $_DETECTION_LOG['oauth_env_file']       = !empty($_envFile)             ? '✅ ' . $_envFile               : '⚠️ env tidak ditemukan';
 $_DETECTION_LOG['oauth_source']         = !empty($_oauthSource)         ? '✅ ' . $_oauthSource           : '❌ tidak ada sumber OAuth';
-$_DETECTION_LOG['oauth_client_id']      = !empty($_oauthClientId)       ? '✅ terisi (' . $_oauthSource . ')' : '❌ belum diisi';
-$_DETECTION_LOG['oauth_username']       = !empty($_oauthUsername)       ? '✅ terisi (' . $_oauthSource . ')' : '❌ belum diisi';
+$_DETECTION_LOG['oauth_sertifikat']     = !empty($_oauthSertifikat)
+    ? '✅ terisi — AKAN DIPAKAI sebagai KodeSertifikat'
+    : '❌ KOSONG — fallback ke OAUTH_CLIENT_ID (kemungkinan salah!)';
+$_DETECTION_LOG['oauth_client_id']      = !empty($_oauthClientId)       ? '✅ terisi (' . $_oauthSource . ')' : '⚠️ kosong (opsional untuk SSO)';
+$_DETECTION_LOG['oauth_username']       = !empty($_oauthUsername)       ? '✅ terisi (' . $_oauthSource . ')' : '⚠️ kosong (opsional)';
 $_DETECTION_LOG['oauth_corporate_id']   = !empty($_oauthCorporateId)    ? '✅ ' . $_oauthCorporateId      : '⚠️ kosong (opsional)';
 $_DETECTION_LOG['oauth_token_private']  = !empty($_oauthTokenPrivate)   ? '✅ RSA key terdeteksi'         : '⚠️ tidak ada (opsional)';
 $_DETECTION_LOG['de061_sim_serial']     = !empty($_de061)               ? '✅ terisi dari .assist.env'    : '⚠️ kosong';
@@ -641,7 +644,7 @@ function sendHttpPost(string $url, string $body, array $headers): array {
  *                     http://db.auth.access.sis1.net/auth2_access/public/getaccesstoken
  *
  *  auth2_access mensyaratkan:
- *    Header : Authorization: Bearer {KodeSertifikat}   ← OAUTH_CLIENT_ID
+ *    Header : Authorization: Bearer {KodeSertifikat}   ← OAUTH_SERTIFIKAT
  *    POST   : PLATFORM=xxx&DEVICEID=xxx&VERSIAPLIKASI=xxx
  *    (BUKAN format OAuth2 standard grant_type/client_id/etc)
  *
@@ -1035,8 +1038,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'inqui
         $errorMessage = 'Kode bank tujuan wajib diisi!';
     } elseif (KODE_AGEN === '') {
         $errorMessage = '⚠️ KODE_AGEN tidak terdeteksi! Pastikan ada file cache snap_ft_bdi.cache di storage/cds/cache/ dalam direktori assist-switching_v3_pro.';
-    } elseif (OAUTH_CLIENT_ID === '' && OAUTH_USERNAME === '') {
-        $errorMessage = '⚠️ Kredensial OAuth belum dikonfigurasi! Buat file .assist.env dengan isi: OAUTH_CLIENT_ID, OAUTH_CLIENT_SECRET, OAUTH_USERNAME, OAUTH_PASSWORD.';
+    } elseif (OAUTH_SERTIFIKAT === '' && OAUTH_CLIENT_ID === '') {
+        $errorMessage = '⚠️ KodeSertifikat belum dikonfigurasi! Buat file .assist.env dengan isi: OAUTH_SERTIFIKAT=<KodeSertifikat dari admin SIS>.';
     } else {
         // Cek batas nominal BIFAST
         $nominal = (int)preg_replace('/\D/', '', $formData['nominal'] ?? '0');
@@ -1096,7 +1099,8 @@ $daftarBankBIC = [
     'HANAIDIDK'  => 'Bank KEB Hana',
 ];
 
-$isConfigured = (KODE_AGEN !== '' && OAUTH_CLIENT_ID !== '' && OAUTH_USERNAME !== '');
+// Konfigurasi minimal: KODE_AGEN + salah satu dari OAUTH_SERTIFIKAT atau OAUTH_CLIENT_ID
+$isConfigured = (KODE_AGEN !== '' && (OAUTH_SERTIFIKAT !== '' || OAUTH_CLIENT_ID !== ''));
 ?>
 <!DOCTYPE html>
 <html lang="id">
@@ -1427,11 +1431,10 @@ $isConfigured = (KODE_AGEN !== '' && OAUTH_CLIENT_ID !== '' && OAUTH_USERNAME !=
             Status Auto-Detection &amp; Konfigurasi (BIFAST)
             <?php
                 $totalOk  = 0; $totalErr = 0; $totalWarn = 0;
-                if (KODE_AGEN !== '')       $totalOk++; else $totalErr++;
-                if (OAUTH_CLIENT_ID !== '') $totalOk++; else $totalErr++;
-                if (OAUTH_USERNAME !== '')  $totalOk++; else $totalErr++;
-                if ($_ASSIST_ROOT !== '')   $totalOk++; else $totalWarn++;
-                if ($_ASSIST_BPR_ROOT !== '') $totalOk++; else $totalWarn++;
+                if (KODE_AGEN !== '')                              $totalOk++; else $totalErr++;
+                if (OAUTH_SERTIFIKAT !== '' || OAUTH_CLIENT_ID !== '') $totalOk++; else $totalErr++;
+                if ($_ASSIST_ROOT !== '')                          $totalOk++; else $totalWarn++;
+                if ($_ASSIST_BPR_ROOT !== '')                      $totalOk++; else $totalWarn++;
                 $overallClass = $totalErr > 0 ? 'error' : ($totalWarn > 0 ? 'warn' : 'ready');
                 $overallLabel = $totalErr > 0 ? '❌ Belum Siap' : ($totalWarn > 0 ? '⚠️ Sebagian' : '✅ Siap');
             ?>
@@ -1449,7 +1452,8 @@ $isConfigured = (KODE_AGEN !== '' && OAUTH_CLIENT_ID !== '' && OAUTH_USERNAME !=
         $kodeAgenOk    = KODE_AGEN !== '';
         $mftfiOk       = !empty($_CACHE_BF['mftfi'] ?? null);
         $cacheFileOk   = file_exists(CACHE_FILE_BIFAST);
-        $oauthIdOk     = OAUTH_CLIENT_ID !== '';
+        $oauthSertOk   = OAUTH_SERTIFIKAT !== '';   // KRITIS: KodeSertifikat untuk assist-switching
+        $oauthIdOk     = OAUTH_CLIENT_ID !== '';     // opsional: hanya untuk OAuth2 SSO
         $oauthSecOk    = OAUTH_CLIENT_SECRET !== '';
         $oauthUserOk   = OAUTH_USERNAME !== '';
         $oauthPassOk   = OAUTH_PASSWORD !== '';
@@ -1559,7 +1563,8 @@ $isConfigured = (KODE_AGEN !== '' && OAUTH_CLIENT_ID !== '' && OAUTH_USERNAME !=
         </div>
 
         <?php
-        $panelCls3 = ($oauthIdOk && $oauthSecOk && $oauthUserOk) ? 'ready' : ($oauthIdOk || $oauthUserOk ? 'warn' : 'error');
+        // Panel siap jika OAUTH_SERTIFIKAT terisi (field kritis)
+        $panelCls3 = $oauthSertOk ? 'ready' : ($oauthIdOk ? 'warn' : 'error');
         $srcLabel  = '';
         if (!empty($_BPR_ENV['_env_file']))        $srcLabel = 'bpr-env: ' . basename($_BPR_ENV['_env_file']);
         elseif (!empty($_ASSIST_ENV['_env_file'])) $srcLabel = '.assist.env';
@@ -1574,36 +1579,54 @@ $isConfigured = (KODE_AGEN !== '' && OAUTH_CLIENT_ID !== '' && OAUTH_USERNAME !=
             </div>
             <div class="det-rows">
                 <?php $row(
-                    $oauthIdOk ? '✅' : '❌',
+                    $oauthSertOk ? '✅' : '❌',
+                    'OAUTH_SERTIFIKAT',
+                    $oauthSertOk ? substr(OAUTH_SERTIFIKAT, 0, 8) . str_repeat('•', 24) : 'BELUM DIISI — wajib untuk get token',
+                    $oauthSertOk ? 'ok' : 'err',
+                    $oauthSertOk ? 'AKTIF' : 'MISSING',
+                    $oauthSertOk ? 'ok' : 'err'
+                ); ?>
+                <?php
+                $kodeAplikasiOk = OAUTH_KODE_APLIKASI !== '';
+                $row(
+                    $kodeAplikasiOk ? '✅' : '⚠️',
+                    'OAUTH_KODE_APLIKASI',
+                    $kodeAplikasiOk ? OAUTH_KODE_APLIKASI : 'Kosong (opsional)',
+                    $kodeAplikasiOk ? 'ok' : 'warn',
+                    $kodeAplikasiOk ? OAUTH_KODE_APLIKASI : 'OPSIONAL',
+                    $kodeAplikasiOk ? 'ok' : 'info'
+                ); ?>
+                <?php $row(
+                    $oauthIdOk ? '✅' : '⚠️',
                     'OAUTH_CLIENT_ID',
-                    $oauthIdOk ? OAUTH_CLIENT_ID : 'Belum diisi',
-                    $oauthIdOk ? 'ok' : 'err',
-                    $oauthIdOk ? 'OK' : 'MISSING',
-                    $oauthIdOk ? 'ok' : 'err'
+                    $oauthIdOk ? OAUTH_CLIENT_ID : 'Kosong (opsional — hanya OAuth2 SSO)',
+                    $oauthIdOk ? 'ok' : 'warn',
+                    $oauthIdOk ? 'OK' : 'OPSIONAL',
+                    $oauthIdOk ? 'ok' : 'info'
                 ); ?>
                 <?php $row(
-                    $oauthSecOk ? '✅' : '❌',
+                    $oauthSecOk ? '✅' : '⚠️',
                     'OAUTH_CLIENT_SECRET',
-                    $oauthSecOk ? substr(OAUTH_CLIENT_SECRET, 0, 8) . str_repeat('•', 12) : 'Belum diisi',
-                    $oauthSecOk ? 'ok' : 'err',
-                    $oauthSecOk ? 'OK' : 'MISSING',
-                    $oauthSecOk ? 'ok' : 'err'
+                    $oauthSecOk ? substr(OAUTH_CLIENT_SECRET, 0, 8) . str_repeat('•', 12) : 'Kosong (opsional)',
+                    $oauthSecOk ? 'ok' : 'warn',
+                    $oauthSecOk ? 'OK' : 'OPSIONAL',
+                    $oauthSecOk ? 'ok' : 'info'
                 ); ?>
                 <?php $row(
-                    $oauthUserOk ? '✅' : '❌',
+                    $oauthUserOk ? '✅' : '⚠️',
                     'OAUTH_USERNAME',
-                    $oauthUserOk ? OAUTH_USERNAME : 'Belum diisi',
-                    $oauthUserOk ? 'ok' : 'err',
-                    $oauthUserOk ? 'OK' : 'MISSING',
-                    $oauthUserOk ? 'ok' : 'err'
+                    $oauthUserOk ? OAUTH_USERNAME : 'Kosong (opsional untuk MRA000301)',
+                    $oauthUserOk ? 'ok' : 'warn',
+                    $oauthUserOk ? 'OK' : 'OPSIONAL',
+                    $oauthUserOk ? 'ok' : 'info'
                 ); ?>
                 <?php $row(
-                    $oauthPassOk ? '✅' : '❌',
+                    $oauthPassOk ? '✅' : '⚠️',
                     'OAUTH_PASSWORD',
-                    $oauthPassOk ? str_repeat('•', 8) : 'Belum diisi',
-                    $oauthPassOk ? 'ok' : 'err',
-                    $oauthPassOk ? 'OK' : 'MISSING',
-                    $oauthPassOk ? 'ok' : 'err'
+                    $oauthPassOk ? str_repeat('•', 8) : 'Kosong (opsional)',
+                    $oauthPassOk ? 'ok' : 'warn',
+                    $oauthPassOk ? 'OK' : 'OPSIONAL',
+                    $oauthPassOk ? 'ok' : 'info'
                 ); ?>
                 <?php $row(
                     $de061Ok ? '✅' : '⚠️',
@@ -1644,7 +1667,7 @@ $isConfigured = (KODE_AGEN !== '' && OAUTH_CLIENT_ID !== '' && OAUTH_USERNAME !=
                 DE048 dikirim: <code style="background:#bbf7d0;padding:1px 5px;border-radius:3px;">0601*1001*INQBIFAST~~BLTRFAG</code>.
                 <?php if (!$isConfigured): ?>
                 <br><strong style="color:#b45309;">⚠️ Buat <code>.assist.env</code>:
-                OAUTH_CLIENT_ID, OAUTH_CLIENT_SECRET, OAUTH_USERNAME, OAUTH_PASSWORD.</strong>
+                <code>OAUTH_SERTIFIKAT=&lt;KodeSertifikat dari admin SIS&gt;</code>.</strong>
                 <?php endif; ?>
             </div>
         </div>

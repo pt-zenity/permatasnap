@@ -419,14 +419,16 @@ $_urlGetToken   = $_LOCAL_CONFIG['_URL_GET_TOKEN_'] ?? ($_myAssistBase . '/oauth
 $_urlCekToken   = $_LOCAL_CONFIG['_URL_CEK_TOKEN_'] ?? ($_myAssistBase . '/oauth/cekaccesstoken');
 $_urlRfzToken   = $_LOCAL_CONFIG['_URL_RFZ_TOKEN_'] ?? ($_myAssistBase . '/oauth/getaccesstokenfromrefresh');
 $_swProBase     = $_LOCAL_CONFIG['_URL_SW_PRO_']    ?? 'http://switching.mcoll.sis1.net/assist-switching_v3_pro/public';
-$_urlDigital    = $_LOCAL_CONFIG['s']               ?? ($_swProBase . '/mobile-digital');
-$_urlDigitalSS  = $_LOCAL_CONFIG['ss']              ?? ($_swProBase . '/mobile-digital');
+// URL_DIGITAL selalu dibangun dari _URL_SW_PRO_ (proxy v3)
+// Key 's'/'ss' di local_config adalah URL INTERNAL switching→digital, TIDAK dipakai langsung
+$_urlDigital    = $_swProBase . '/mobile-digital';
+$_urlDigitalSS  = $_swProBase . '/mobile-digital';
 $_mftfi         = $_CACHE_BF['mftfi']               ?? ($_LOCAL_CONFIG['mftfi'] ?? '002');
 
 $_DETECTION_LOG['assist_root']    = $_ASSIST_ROOT ?: '— tidak ditemukan (fallback ke default)';
 $_DETECTION_LOG['local_config']   = !empty($_LOCAL_CONFIG) ? '✅ Terbaca (' . count($_LOCAL_CONFIG) . ' keys)' : '⚠️ Tidak ditemukan';
 $_DETECTION_LOG['url_get_token']  = empty($_LOCAL_CONFIG['_URL_GET_TOKEN_']) ? '⚠️ fallback default' : '✅ dari local_config.php';
-$_DETECTION_LOG['url_digital']    = empty($_LOCAL_CONFIG['s'])               ? '⚠️ fallback default (switching.mcoll.sis1.net)' : '✅ dari local_config.php';
+$_DETECTION_LOG['url_digital']    = !empty($_LOCAL_CONFIG['_URL_SW_PRO_']) ? '✅ dari local_config.php (_URL_SW_PRO_)' : '⚠️ fallback default (switching.mcoll.sis1.net)';
 
 // ── KODE_AGEN + MFTFI BIFAST (dari cache file snap_ft_bdi) ───
 $_kodeAgen       = $_CACHE_BF['kode_agen'] ?? '';
@@ -1441,7 +1443,7 @@ $isConfigured = (KODE_AGEN !== '' && (OAUTH_SERTIFIKAT !== '' || OAUTH_CLIENT_ID
         $bprRootOk     = $_ASSIST_BPR_ROOT !== '';
         $localCfgOk    = !empty($_LOCAL_CONFIG);
         $urlTokenOk    = !empty($_LOCAL_CONFIG['_URL_GET_TOKEN_']);
-        $urlDigitalOk  = !empty($_LOCAL_CONFIG['s']);
+        $urlDigitalOk  = !empty($_LOCAL_CONFIG['_URL_SW_PRO_']);
         $kodeAgenOk    = KODE_AGEN !== '';
         $mftfiOk       = !empty($_CACHE_BF['mftfi'] ?? null);
         $cacheFileOk   = file_exists(CACHE_FILE_BIFAST);

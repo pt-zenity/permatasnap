@@ -507,11 +507,11 @@ if (empty($_oauthTokenPrivate) && !empty($_BPR_ENV['OAUTH_TOKEN_PRIVATE'])) $_oa
 if (empty($_oauthSertifikat)    && !empty($_BPR_ENV['OAUTH_SERTIFIKAT']))    $_oauthSertifikat   = $_BPR_ENV['OAUTH_SERTIFIKAT'];
 if (empty($_oauthKodeAplikasi) && !empty($_BPR_ENV['OAUTH_KODE_APLIKASI'])) $_oauthKodeAplikasi = $_BPR_ENV['OAUTH_KODE_APLIKASI'];
 if (empty($_de061)             && !empty($_BPR_ENV['DE061_SIM_SERIAL']))     $_de061             = $_BPR_ENV['DE061_SIM_SERIAL'];
-// Sumber 3: hardcoded defaults dari tabel accesstoken row MRA000301/android
+// Sumber 3: hardcoded defaults dari tabel accesstoken row MRA000291/android
 // Digunakan jika .assist.env tidak ada DAN assist-bpr.net/env tidak mengandung nilai ini
-if (empty($_oauthSertifikat))   $_oauthSertifikat   = '05038c991666fc57a0d6f4ebe0b92cdf';
-if (empty($_oauthKodeAplikasi)) $_oauthKodeAplikasi = 'MRA000301';
-if (empty($_de061))             $_de061             = '0069d858961c8ef36a20';
+if (empty($_oauthSertifikat))   $_oauthSertifikat   = 'd9ebe47971b415daadc3440ee4070aea';
+if (empty($_oauthKodeAplikasi)) $_oauthKodeAplikasi = 'MRA000291';
+if (empty($_de061))             $_de061             = '0103aab935bfa953c260';
 
 $_envFile = !empty($_oauthSource) && str_contains($_oauthSource, 'bpr')
     ? ($_BPR_ENV['_env_file'] ?? ($_ASSIST_ENV['_env_file'] ?? ''))
@@ -519,7 +519,7 @@ $_envFile = !empty($_oauthSource) && str_contains($_oauthSource, 'bpr')
 
 $_DETECTION_LOG['assist_bpr_root']      = !empty($_ASSIST_BPR_ROOT)     ? '✅ ' . $_ASSIST_BPR_ROOT      : '— tidak ditemukan';
 $_DETECTION_LOG['oauth_env_file']       = !empty($_envFile)             ? '✅ ' . $_envFile               : '⚠️ env tidak ditemukan';
-$_DETECTION_LOG['oauth_source']         = !empty($_oauthSource)         ? '✅ ' . $_oauthSource           : '⚠️ tidak ada .assist.env (pakai hardcoded MRA000301)';
+$_DETECTION_LOG['oauth_source']         = !empty($_oauthSource)         ? '✅ ' . $_oauthSource           : '⚠️ tidak ada .assist.env (pakai hardcoded MRA000291)';
 $_DETECTION_LOG['oauth_client_id']      = !empty($_oauthClientId)       ? '✅ terisi (' . $_oauthSource . ')' : '❌ belum diisi';
 $_DETECTION_LOG['oauth_sertifikat']     = !empty($_oauthSertifikat)
     ? '✅ terisi — AKAN DIPAKAI sebagai KodeSertifikat'
@@ -553,7 +553,7 @@ define('DE061_SIM_SERIAL',     $_de061);
 // Diperoleh dari admin SIS, disimpan di .assist.env sebagai OAUTH_SERTIFIKAT=xxxx
 // Jika kosong, getAccessToken() fallback ke OAUTH_CLIENT_ID (backward compat).
 define('OAUTH_SERTIFIKAT',     $_oauthSertifikat);
-// OAUTH_KODE_APLIKASI = KodeAplikasi di tabel accesstoken (mis: MRA000301)
+// OAUTH_KODE_APLIKASI = KodeAplikasi di tabel accesstoken (mis: MRA000291)
 define('OAUTH_KODE_APLIKASI',  $_oauthKodeAplikasi);
 
 // ── Token Cache (CDS pattern) ────────────────────────────────
@@ -702,17 +702,17 @@ function getAccessToken(): array {
 
     // 2. Bangun POST body sesuai format Assist (bukan OAuth2 standard)
     //    DEVICEID  = DE061_SIM_SERIAL (IP server) jika ada, fallback SERVER_ADDR, fallback KODE_AGEN, fallback md5 hostname
-    //    Dari tabel accesstoken MRA000301: DeviceID='0069d858961c8ef36a20', Platform='android', VersiAplikasi='2.9.0'
+    //    Dari tabel accesstoken MRA000291: DeviceID='0103aab935bfa953c260', Platform='android', VersiAplikasi='1.2.6'
     $deviceId = DE061_SIM_SERIAL
         ?: ($_SERVER['SERVER_ADDR'] ?? '')
         ?: (KODE_AGEN ?: md5(gethostname()));
     $postBody = [
         'PLATFORM'      => 'android',
         'DEVICEID'      => $deviceId,
-        'VERSIAPLIKASI' => '2.9.0',
+        'VERSIAPLIKASI' => '1.2.6',
         'USERNAME'      => OAUTH_USERNAME,
     ];
-    // Sertakan KODEAPLIKASI jika tersedia (dari tabel accesstoken: KodeAplikasi='MRA000301')
+    // Sertakan KODEAPLIKASI jika tersedia (dari tabel accesstoken: KodeAplikasi='MRA000291')
     if (OAUTH_KODE_APLIKASI !== '') {
         $postBody['KODEAPLIKASI'] = OAUTH_KODE_APLIKASI;
     }

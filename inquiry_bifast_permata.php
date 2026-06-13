@@ -654,21 +654,26 @@ function getAccessToken(): array {
     }
 
     // Fallback: client_credentials
-    if ($result['http_code'] !== 200) {
-        $body2 = http_build_query([
-            'grant_type'    => 'client_credentials',
-            'client_id'     => OAUTH_CLIENT_ID,
-            'client_secret' => OAUTH_CLIENT_SECRET,
-        ]);
-        $result2 = sendHttpPost(URL_GET_TOKEN, $body2, $headers);
-        $data2   = $result2['data'];
-        if (!empty($data2['access_token'])) {
-            saveTokenCache($data2);
-            return ['success' => true, 'token' => $data2['access_token'], 'from_cache' => false, 'raw' => $result2];
-        }
+    // Dicoba kapanpun access_token tidak ada (HTTP 200 dengan body error pun tetap dicoba)
+    $body2 = http_build_query([
+        'grant_type'    => 'client_credentials',
+        'client_id'     => OAUTH_CLIENT_ID,
+        'client_secret' => OAUTH_CLIENT_SECRET,
+    ]);
+    $result2 = sendHttpPost(URL_GET_TOKEN, $body2, $headers);
+    $data2   = $result2['data'];
+    if (!empty($data2['access_token'])) {
+        saveTokenCache($data2);
+        return ['success' => true, 'token' => $data2['access_token'], 'from_cache' => false, 'raw' => $result2];
     }
 
-    $errMsg = $data['error_description'] ?? $data['message'] ?? ('HTTP ' . $result['http_code']);
+    // Susun pesan error yang informatif dari response asli
+    // Prioritas: error_description > error > message > body mentah > "HTTP {code}"
+    $errMsg = $data['error_description']
+           ?? $data['error']
+           ?? $data['message']
+           ?? (trim($result['raw']) ?: null)
+           ?? ('HTTP ' . $result['http_code'] . ', otomatis mendapatkan token');
     return ['success' => false, 'error' => $errMsg, 'raw' => $result];
 }
 
@@ -879,7 +884,8 @@ function inquiryBIFAST(array $params): array {
     $debug['step4_iso_response'] = $isoResponse;
 
     // Ambil RC dan MSG
-    $rc      = $isoResponse['RC']  ?? $isoResponse['rc'] ?? ($httpResult['http_code'] == 200 ? '00' : 'XT');
+    // Fallback: 'XT' jika RC tidak ada di response (bukan otomatis '00' meski HTTP 200)
+    $rc      = $isoResponse['RC']  ?? $isoResponse['rc'] ?? 'XT';
     $msgData = $isoResponse['MSG'] ?? $isoResponse;
 
     // Parse tagihan / nama rekening dari MSG
@@ -1819,6 +1825,12 @@ Cache File : <?= htmlspecialchars(CACHE_FILE_BIFAST) ?>
 Dari Cache : <?= ($result['debug']['step1_get_token']['from_cache'] ?? false) ? 'YA' : 'TIDAK' ?>
 
 Sukses     : <?= ($result['debug']['step1_get_token']['success'] ?? false) ? 'YA' : 'TIDAK' ?>
+
+HTTP Code  : <?= htmlspecialchars((string)($result['debug']['step1_get_token']['raw']['http_code'] ?? '-')) ?>
+
+Error Msg  : <?= htmlspecialchars($result['debug']['step1_get_token']['error'] ?? '-') ?>
+
+OAuth Raw  : <?= htmlspecialchars($result['debug']['step1_get_token']['raw']['raw'] ?? '-') ?>
 
 
 <span class="dc">━━ STEP 2: ISO 8583 REQUEST (MTI=010, INQBIFAST) ━━</span>

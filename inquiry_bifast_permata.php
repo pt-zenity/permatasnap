@@ -48,16 +48,38 @@ date_default_timezone_set('Asia/Jakarta');
 
 /**
  * Cari direktori root assist-switching_v3_pro secara otomatis.
+ *
+ * Urutan pencarian:
+ *   1. Known absolute paths (produksi, dicek berurutan):
+ *        /var/www/prg/app/assist/aa-pro/app/assist-switching_v3_pro
+ *   2. Traversal dari __DIR__ ke atas (maks 6 level):
+ *      Cocok jika >= 2 dari 3 marker ditemukan:
+ *        config/local_config.php | storage/cds/cache | sisproject/project.json
  */
 function detectAssistRoot(): string {
     $markers = ['config/local_config.php', 'storage/cds/cache', 'sisproject/project.json'];
-    $dir = __DIR__;
-    for ($i = 0; $i < 6; $i++) {
+
+    // ── Helper validasi root ──────────────────────────────────
+    $isValidRoot = function (string $candidate) use ($markers): bool {
         $found = 0;
         foreach ($markers as $m) {
-            if (file_exists($dir . '/' . $m)) $found++;
+            if (file_exists($candidate . '/' . $m)) $found++;
         }
-        if ($found >= 2) return $dir;
+        return $found >= 2;
+    };
+
+    // ── Langkah 1: known absolute paths (produksi) ────────────
+    $knownPaths = [
+        '/var/www/prg/app/assist/aa-pro/app/assist-switching_v3_pro',
+    ];
+    foreach ($knownPaths as $known) {
+        if ($isValidRoot($known)) return $known;
+    }
+
+    // ── Langkah 2: traversal dari __DIR__ ke atas ─────────────
+    $dir = __DIR__;
+    for ($i = 0; $i < 6; $i++) {
+        if ($isValidRoot($dir)) return $dir;
         $parent = dirname($dir);
         if ($parent === $dir) break;
         $dir = $parent;

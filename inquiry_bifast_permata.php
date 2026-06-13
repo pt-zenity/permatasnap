@@ -616,8 +616,24 @@ function sendHttpPost(string $url, string $body, array $headers): array {
 }
 
 /**
- * Ambil OAuth Access Token dari myassist.sis1.net
- * Implementasi sesuai func.oauth.mod.php
+ * Ambil OAuth Access Token dari myassist.sis1.net (assist-auth_api)
+ *
+ * ARSITEKTUR (hasil analisis source code assist-auth_api):
+ *
+ *  Kita  →  assist-auth_api (/oauth/getaccesstoken)
+ *              → routes ke access::go()
+ *              → ApiController::GetAccessToken()
+ *                  → baca header 'Authorization: Bearer' dari request kita
+ *                  → POST $_POST + header Authorization ke:
+ *                     http://db.auth.access.sis1.net/auth2_access/public/getaccesstoken
+ *
+ *  auth2_access mensyaratkan:
+ *    Header : Authorization: Bearer {KodeSertifikat}   ← OAUTH_CLIENT_ID
+ *    POST   : PLATFORM=xxx&DEVICEID=xxx&VERSIAPLIKASI=xxx
+ *    (BUKAN format OAuth2 standard grant_type/client_id/etc)
+ *
+ *  Response sukses (auth2_access):
+ *    {"Status":1, "Data":{"AccessToken":"...","RefreshToken":"...","LifeTime":"10", ...}}
  */
 function getAccessToken(): array {
     // 1. Coba dari cache
@@ -626,22 +642,23 @@ function getAccessToken(): array {
         return ['success' => true, 'token' => $cached, 'from_cache' => true];
     }
 
-    // 2. Request token baru (grant_type=password)
+    // 2. Bangun POST body sesuai format Assist (bukan OAuth2 standard)
+    //    DEVICEID  = DE061_SIM_SERIAL jika ada, fallback KODE_AGEN, fallback md5 hostname
+    $deviceId = DE061_SIM_SERIAL ?: (KODE_AGEN ?: md5(gethostname()));
     $body = http_build_query([
-        'grant_type'    => 'password',
-        'username'      => OAUTH_USERNAME,
-        'password'      => OAUTH_PASSWORD,
-        'client_id'     => OAUTH_CLIENT_ID,
-        'client_secret' => OAUTH_CLIENT_SECRET,
+        'PLATFORM'       => 'ANDROID',
+        'DEVICEID'       => $deviceId,
+        'VERSIAPLIKASI'  => '1.0.0',
+        'USERNAME'       => OAUTH_USERNAME,
     ]);
 
-    // Authorization: Basic wajib dikirim karena assist-auth_api adalah reverse proxy
-    // yang meneruskan header Authorization dari request masuk ke OAuth server.
-    // Tanpa header ini → proxy tidak punya credentials → "Platform tidak ada".
+    // 3. Header: Authorization: Bearer {KodeSertifikat}
+    //    assist-auth_api membaca header ini dan meneruskannya ke auth2_access.
+    //    OAUTH_CLIENT_ID = auth_client_id = KodeSertifikat yang terdaftar di DB.
     $headers = [
         'Content-Type: application/x-www-form-urlencoded',
         'Accept: application/json',
-        'Authorization: Basic ' . base64_encode(OAUTH_CLIENT_ID . ':' . OAUTH_CLIENT_SECRET),
+        'Authorization: Bearer ' . OAUTH_CLIENT_ID,
     ];
 
     $result = sendHttpPost(URL_GET_TOKEN, $body, $headers);
@@ -652,32 +669,31 @@ function getAccessToken(): array {
 
     $data = $result['data'];
 
-    if (!empty($data['access_token'])) {
-        saveTokenCache($data);
-        return ['success' => true, 'token' => $data['access_token'], 'from_cache' => false, 'raw' => $result];
+    // Response sukses: {"Status":1, "Data":{"AccessToken":"...","RefreshToken":"...","LifeTime":"10"}}
+    // AccessToken (kapital A) — bukan access_token (OAuth2 standard)
+    $accessToken = $data['Data']['AccessToken']
+                ?? $data['data']['AccessToken']
+                ?? $data['access_token']
+                ?? '';
+
+    if (!empty($accessToken)) {
+        // Normalisasi ke format cache: simpan sebagai access_token
+        $cacheData = [
+            'access_token' => $accessToken,
+            'expires_in'   => (int)(($data['Data']['LifeTime'] ?? 10) * 60),
+        ];
+        saveTokenCache($cacheData);
+        return ['success' => true, 'token' => $accessToken, 'from_cache' => false, 'raw' => $result];
     }
 
-    // Fallback: client_credentials (dengan header Authorization yang sama)
-    // Dicoba kapanpun access_token tidak ada (HTTP 200 dengan body error pun tetap dicoba)
-    $body2 = http_build_query([
-        'grant_type'    => 'client_credentials',
-        'client_id'     => OAUTH_CLIENT_ID,
-        'client_secret' => OAUTH_CLIENT_SECRET,
-    ]);
-    $result2 = sendHttpPost(URL_GET_TOKEN, $body2, $headers);
-    $data2   = $result2['data'];
-    if (!empty($data2['access_token'])) {
-        saveTokenCache($data2);
-        return ['success' => true, 'token' => $data2['access_token'], 'from_cache' => false, 'raw' => $result2];
-    }
-
-    // Susun pesan error yang informatif dari response asli
-    // Prioritas: error_description > error > message > body mentah > "HTTP {code}"
-    $errMsg = $data['error_description']
-           ?? $data['error']
+    // Susun pesan error informatif
+    // Prioritas: MSG > message > error_description > body mentah > "HTTP {code}"
+    $errMsg = $data['MSG']
            ?? $data['message']
+           ?? $data['error_description']
+           ?? $data['error']
            ?? (trim($result['raw']) ?: null)
-           ?? ('HTTP ' . $result['http_code'] . ', otomatis mendapatkan token');
+           ?? ('HTTP ' . $result['http_code']);
     return ['success' => false, 'error' => $errMsg, 'raw' => $result];
 }
 

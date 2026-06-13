@@ -657,9 +657,13 @@ function getAccessToken(): array {
         'client_secret' => OAUTH_CLIENT_SECRET,
     ]);
 
+    // Authorization: Basic wajib dikirim karena assist-auth_api adalah reverse proxy
+    // yang meneruskan header Authorization dari request masuk ke OAuth server.
+    // Tanpa header ini → proxy tidak punya credentials → "Platform tidak ada".
     $headers = [
         'Content-Type: application/x-www-form-urlencoded',
         'Accept: application/json',
+        'Authorization: Basic ' . base64_encode(OAUTH_CLIENT_ID . ':' . OAUTH_CLIENT_SECRET),
     ];
 
     $result = sendHttpPost(URL_GET_TOKEN, $body, $headers);
@@ -676,7 +680,7 @@ function getAccessToken(): array {
         return ['success' => true, 'token' => $data['access_token'], 'from_cache' => false, 'raw' => $result];
     }
 
-    // Fallback: client_credentials
+    // Fallback: client_credentials (dengan header Authorization yang sama)
     // Dicoba kapanpun access_token tidak ada (HTTP 200 dengan body error pun tetap dicoba)
     $body2 = http_build_query([
         'grant_type'    => 'client_credentials',
